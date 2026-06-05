@@ -1,0 +1,47 @@
+# Secrets — never commit
+.env
+
+# Database
+database/localization.db
+database/*.db
+database/*.db-wal
+database/*.db-shm
+
+# Generated exports and cache
+data/exports/
+data/cache/
+data/translation_memory/*.xlsx
+data/translation_memory/*.xls
+data/glossary/*.xlsx
+data/glossary/*.xls
+
+# Excel source files (may contain proprietary data)
+*.xlsx
+*.xls
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
