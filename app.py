@@ -26,6 +26,10 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # Initialize database once
 if "db_initialized" not in st.session_state:
     run_migrations()
+    from engines.phrase_memory import seed_phrase_memory
+    from engines.corpus_engine import seed_corpus
+    seed_phrase_memory()
+    seed_corpus()
     st.session_state["db_initialized"] = True
 
 # ── Authentication gate ──────────────────────────────────────────────

@@ -6,6 +6,9 @@ class ConfidenceLabel(str, Enum):
     EXACT_TM = "EXACT_TM"
     FUZZY_TM = "FUZZY_TM"
     GLOSSARY = "GLOSSARY"
+    CATEGORY_GLOSSARY = "CATEGORY_GLOSSARY"
+    PHRASE_MEMORY = "PHRASE_MEMORY"
+    CORPUS = "CORPUS"
     CONTEXT = "CONTEXT"
     GPT = "GPT"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
@@ -17,6 +20,7 @@ class ConfidenceScore:
     score: float
     explanation: str
     needs_review: bool = False
+    warning_level: str = "ok"  # ok | warning | critical
 
     @property
     def color(self) -> str:
@@ -24,6 +28,9 @@ class ConfidenceScore:
             ConfidenceLabel.EXACT_TM: "#22C55E",
             ConfidenceLabel.FUZZY_TM: "#F59E0B",
             ConfidenceLabel.GLOSSARY: "#8B5CF6",
+            ConfidenceLabel.CATEGORY_GLOSSARY: "#7C3AED",
+            ConfidenceLabel.PHRASE_MEMORY: "#0EA5E9",
+            ConfidenceLabel.CORPUS: "#14B8A6",
             ConfidenceLabel.CONTEXT: "#06B6D4",
             ConfidenceLabel.GPT: "#EF4444",
             ConfidenceLabel.LOW_CONFIDENCE: "#DC2626",
@@ -35,6 +42,9 @@ class ConfidenceScore:
             ConfidenceLabel.EXACT_TM: "badge-tm",
             ConfidenceLabel.FUZZY_TM: "badge-fuzzy",
             ConfidenceLabel.GLOSSARY: "badge-glossary",
+            ConfidenceLabel.CATEGORY_GLOSSARY: "badge-glossary",
+            ConfidenceLabel.PHRASE_MEMORY: "badge-glossary",
+            ConfidenceLabel.CORPUS: "badge-glossary",
             ConfidenceLabel.CONTEXT: "badge-glossary",
             ConfidenceLabel.GPT: "badge-ai",
             ConfidenceLabel.LOW_CONFIDENCE: "badge-ai",
@@ -48,7 +58,6 @@ def score_translation(
     tm_score: float = 0.0,
     qa_issue_count: int = 0,
 ) -> ConfidenceScore:
-    # Score based on source type
     if source_type == "TM_EXACT":
         base_score = 1.0
         label = ConfidenceLabel.EXACT_TM
@@ -60,12 +69,27 @@ def score_translation(
         explanation = f"Fuzzy TM match ({tm_score:.0%} similarity)"
 
     elif source_type == "GLOSSARY":
-        base_score = 0.90
+        base_score = 0.92
         label = ConfidenceLabel.GLOSSARY
-        explanation = "Resolved via Dutch glossary"
+        explanation = "Resolved via global Dutch glossary"
+
+    elif source_type == "CATEGORY_GLOSSARY":
+        base_score = 0.93
+        label = ConfidenceLabel.CATEGORY_GLOSSARY
+        explanation = "Resolved via category-specific glossary"
+
+    elif source_type == "PHRASE_MEMORY":
+        base_score = 0.97
+        label = ConfidenceLabel.PHRASE_MEMORY
+        explanation = "Matched phrase in phrase memory"
+
+    elif source_type == "CORPUS":
+        base_score = max(tm_score * 0.95, 0.75)
+        label = ConfidenceLabel.CORPUS
+        explanation = f"Home24 corpus match ({tm_score:.0%})"
 
     elif source_type == "CONTEXT":
-        base_score = 0.85
+        base_score = 0.88
         label = ConfidenceLabel.CONTEXT
         explanation = "Context-based translation rule"
 
@@ -74,8 +98,8 @@ def score_translation(
         label = ConfidenceLabel.FUZZY_TM
         explanation = f"TF-IDF semantic match ({tm_score:.0%})"
 
-    elif source_type == "AI":
-        base_score = 0.70
+    elif source_type in ("GPT", "AI"):
+        base_score = 0.72
         label = ConfidenceLabel.GPT
         explanation = "GPT fallback (no TM match)"
 
@@ -84,7 +108,6 @@ def score_translation(
         label = ConfidenceLabel.LOW_CONFIDENCE
         explanation = "Source unknown"
 
-    # Penalize for QA issues
     if qa_issue_count > 0:
         base_score -= 0.05 * qa_issue_count
         base_score = max(base_score, 0.0)
@@ -95,6 +118,14 @@ def score_translation(
     if base_score < 0.60 and label not in (ConfidenceLabel.LOW_CONFIDENCE,):
         label = ConfidenceLabel.LOW_CONFIDENCE
         explanation += " (low score)"
+
+    # Warning thresholds: <85% = warning, <70% = critical
+    if base_score < 0.70:
+        warning_level = "critical"
+    elif base_score < 0.85:
+        warning_level = "warning"
+    else:
+        warning_level = "ok"
 
     needs_review = (
         label == ConfidenceLabel.LOW_CONFIDENCE
@@ -107,6 +138,7 @@ def score_translation(
         score=round(base_score, 3),
         explanation=explanation,
         needs_review=needs_review,
+        warning_level=warning_level,
     )
 
 

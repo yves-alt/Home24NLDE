@@ -157,9 +157,13 @@ def _run_translation(wb, tmp_path, sheet_configs, fuzzy_threshold, max_rows):
                 "tm_hits": batch_result.tm_hits,
                 "fuzzy_hits": batch_result.fuzzy_hits,
                 "glossary_hits": batch_result.glossary_hits,
+                "phrase_hits": batch_result.phrase_hits,
+                "corpus_hits": batch_result.corpus_hits,
                 "tfidf_hits": batch_result.tfidf_hits,
                 "ai_hits": batch_result.ai_hits,
                 "low_confidence": len(batch_result.low_confidence_rows),
+                "warning_rows": batch_result.warning_rows,
+                "critical_rows": batch_result.critical_rows,
                 "api_savings": batch_result.api_savings_pct,
                 "qa_corrections": batch_result.qa_corrections,
                 "consistency_score": batch_result.consistency_score,
@@ -189,16 +193,31 @@ def _render_results(all_sheet_results, source_path):
             continue
 
         with st.expander(f"Sheet: {sheet_name} ({total} rows)", expanded=True):
-            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
             col1.metric("TM Exact", stats["tm_hits"])
             col2.metric("Fuzzy+TF-IDF", stats["fuzzy_hits"] + stats.get("tfidf_hits", 0))
             col3.metric("Glossary", stats["glossary_hits"])
-            col4.metric("AI (GPT)", stats["ai_hits"])
-            col5.metric("QA Fixes", stats["qa_corrections"])
-            col6.metric("API Saved", f"{stats.get('api_savings', 0):.0%}")
+            col4.metric("Phrase/Corpus", stats.get("phrase_hits", 0) + stats.get("corpus_hits", 0))
+            col5.metric("AI (GPT)", stats["ai_hits"])
+            col6.metric("QA Fixes", stats["qa_corrections"])
+            col7.metric("API Saved", f"{stats.get('api_savings', 0):.0%}")
 
+            # Confidence warning panel
+            critical_rows = stats.get("critical_rows", [])
+            warning_rows = stats.get("warning_rows", [])
             low_conf = stats.get("low_confidence", 0)
-            if low_conf > 0:
+
+            if critical_rows:
+                st.markdown(
+                    f'<div class="alert-error">🚨 {len(critical_rows)} row(s) CRITICAL confidence (&lt;70%) — must review before publishing.</div>',
+                    unsafe_allow_html=True,
+                )
+            if warning_rows:
+                st.markdown(
+                    f'<div class="alert-warning">⚠ {len(warning_rows)} row(s) WARNING confidence (&lt;85%) — recommended review.</div>',
+                    unsafe_allow_html=True,
+                )
+            if low_conf and not critical_rows and not warning_rows:
                 st.markdown(
                     f'<div class="alert-warning">⚠ {low_conf} row(s) flagged LOW_CONFIDENCE — review before publishing.</div>',
                     unsafe_allow_html=True,
@@ -212,10 +231,11 @@ def _render_results(all_sheet_results, source_path):
             # Low confidence detail
             low_rows = [r for r in result_rows if r.get("Review") == "⚠"]
             if low_rows:
-                with st.expander(f"Low confidence rows ({len(low_rows)})"):
+                with st.expander(f"Rows needing review ({len(low_rows)})"):
                     lc_cols = ["NL Translation", "Source Type", "Confidence", "Score"]
-                    lc_df = pd.DataFrame(low_rows)[[c for c in lc_cols if c in lc_df.columns if c in pd.DataFrame(low_rows).columns]]
-                    st.dataframe(pd.DataFrame(low_rows)[[c for c in lc_cols if c in pd.DataFrame(low_rows).columns]], use_container_width=True)
+                    lc_df = pd.DataFrame(low_rows)
+                    available = [c for c in lc_cols if c in lc_df.columns]
+                    st.dataframe(lc_df[available], use_container_width=True)
 
     _render_export_section(all_sheet_results, source_path)
 
