@@ -117,15 +117,9 @@ Output: only the Dutch translation, no explanation, no quotes."""
 
 
 def _load_api_key() -> str:
-    # Load from Streamlit secrets first, then .env
-    try:
-        import streamlit as st
-        key = st.secrets.get("OPENAI_API_KEY", "")
-        if key:
-            return key
-    except Exception:
-        pass
-    return os.getenv("OPENAI_API_KEY", "")
+    # Delegate to the credentials module — single source of truth
+    from auth.credentials import get_openai_key
+    return get_openai_key()
 
 
 class TranslationEngine:

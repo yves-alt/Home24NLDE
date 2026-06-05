@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 from engines.glossary_engine import get_glossary_manager
+from auth.session import require_permission, can
 
 
 def render():
+    require_permission("glossary")
+
     st.markdown('<div class="section-header">Glossary Manager</div>', unsafe_allow_html=True)
 
     gm = get_glossary_manager()

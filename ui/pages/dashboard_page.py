@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 from database.database import get_connection, get_stats
+from auth.session import require_permission
 
 
 def render():
+    require_permission("dashboard")
+
     st.markdown('<div class="section-header">Dashboard</div>', unsafe_allow_html=True)
 
     db_stats = get_stats()
@@ -32,7 +35,8 @@ def render():
         st.markdown("**Recent Exports**")
         with get_connection() as conn:
             exports = conn.execute(
-                "SELECT filename, rows_processed, tm_hits, ai_hits, qa_corrections, processing_time, exported_at "
+                "SELECT filename, rows_processed, tm_hits, ai_hits, qa_corrections, "
+                "processing_time, exported_at "
                 "FROM export_log ORDER BY exported_at DESC LIMIT 10"
             ).fetchall()
         if exports:

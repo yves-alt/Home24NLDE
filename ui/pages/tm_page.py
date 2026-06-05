@@ -2,9 +2,11 @@ import streamlit as st
 import pandas as pd
 from database.database import get_connection
 from engines.tm_matcher import get_matcher
+from auth.session import require_permission
 
 
 def render():
+    require_permission("tm")
     st.markdown('<div class="section-header">Translation Memory</div>', unsafe_allow_html=True)
 
     with get_connection() as conn:

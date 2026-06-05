@@ -4,9 +4,12 @@ from engines.qa_engine import get_qa_engine
 from engines.name_optimizer import get_name_optimizer
 from engines.residue_detector import get_residue_detector
 from engines.naturalness_rewriter import get_rewriter
+from auth.session import require_permission
 
 
 def render():
+    require_permission("qa")
+
     st.markdown('<div class="section-header">QA & Validation</div>', unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4 = st.tabs(["QA Validator", "Name Optimizer", "Residue Detector", "Naturalness Rules"])

@@ -1,49 +1,32 @@
-import os
-from pathlib import Path
-
 import streamlit as st
-from dotenv import load_dotenv
-
-load_dotenv()
+from auth.credentials import get_openai_key
+from auth.session import require_permission
 
 
 def render():
+    require_permission("settings")
+
     st.markdown('<div class="section-header">Settings & Import</div>', unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["API Key", "Import TM", "Import Glossary", "ML Index"])
-
-    with tab1:
-        st.markdown("**OpenAI API Key**")
+    # Show key status without revealing the value
+    key = get_openai_key()
+    if key:
         st.markdown(
-            '<div class="alert-info">Key is loaded from <code>.env</code> or Streamlit secrets. '
-            'Never hardcoded. Never committed.</div>',
+            '<div class="alert-success">OpenAI API key loaded from secrets.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="alert-warning">OpenAI API key not found. '
+            'Add <code>OPENAI_API_KEY</code> to your <code>.env</code> file or Streamlit secrets.</div>',
             unsafe_allow_html=True,
         )
 
-        current = st.session_state.get("api_key", os.getenv("OPENAI_API_KEY", ""))
-        if current:
-            masked = f"sk-...{current[-6:]}" if len(current) > 10 else "****"
-            st.success(f"Key loaded: `{masked}`")
-        else:
-            st.warning("No API key found. Add `OPENAI_API_KEY=...` to your `.env` file.")
+    st.markdown("---")
 
-        new_key = st.text_input("Override key (session only)", type="password", placeholder="sk-proj-...")
-        if st.button("Use this key", type="primary"):
-            if new_key:
-                st.session_state["api_key"] = new_key
-                from engines.translation_engine import get_engine
-                get_engine(new_key)
-                st.success("Key set for this session.")
+    tab1, tab2, tab3 = st.tabs(["Import TM", "Import Glossary", "ML Index"])
 
-        model = st.selectbox(
-            "OpenAI model",
-            ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"],
-            index=0,
-            help="gpt-4o-mini is fastest and cheapest; used only when TM/glossary have no match.",
-        )
-        st.session_state["openai_model"] = model
-
-    with tab2:
+    with tab1:
         st.markdown("**Import Translation Memory from XLSX**")
         st.caption("Expects columns: `Source (de-DE)`, `Target (nl-NL)`, `Usage Count`")
 
@@ -78,7 +61,7 @@ def render():
                 except Exception as e:
                     st.error(f"Import failed: {e}")
 
-    with tab3:
+    with tab2:
         st.markdown("**Import Glossary from Excel**")
         st.caption("Expects columns: source term (DE), target term (NL), optional category.")
 
@@ -95,16 +78,16 @@ def render():
                 except Exception as e:
                     st.error(f"Import failed: {e}")
 
-    with tab4:
+    with tab3:
         st.markdown("**TF-IDF Semantic Index**")
-        st.caption("Build the semantic index to enable TF-IDF matching (step 3 of pipeline).")
+        st.caption("Build the semantic index to enable TF-IDF matching (step 4 of pipeline).")
 
         from engines.semantic_matcher import get_semantic_matcher
         matcher = get_semantic_matcher()
         if matcher.is_ready:
             st.success("Semantic index is built and ready.")
         else:
-            st.warning("Index not built yet. Click below to build it.")
+            st.warning("Index not built yet.")
 
         if st.button("Build Semantic Index", type="primary"):
             progress = st.progress(0.0)

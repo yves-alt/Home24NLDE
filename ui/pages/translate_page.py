@@ -12,12 +12,16 @@ from database.database import get_connection
 
 
 def render():
+    from auth.session import require_permission
+    require_permission("translate")
+
     st.markdown('<div class="section-header">Translate Workbook</div>', unsafe_allow_html=True)
 
-    api_key = st.session_state.get("api_key", os.getenv("OPENAI_API_KEY", ""))
-    if not api_key:
+    from auth.credentials import get_openai_key
+    if not get_openai_key():
         st.markdown(
-            '<div class="alert-warning">No API key set. TM-only mode active (no AI fallback). Set key in Settings.</div>',
+            '<div class="alert-warning">OpenAI API key not configured. '
+            'TM-only mode active. Add the key to your secrets.</div>',
             unsafe_allow_html=True,
         )
 
@@ -77,11 +81,11 @@ def render():
         max_rows = st.number_input("Max rows to translate (0 = all)", min_value=0, value=0, step=50)
 
     if st.button("Start Translation", type="primary", use_container_width=True):
-        _run_translation(wb, tmp_path, sheet_configs, api_key, fuzzy_threshold, max_rows)
+        _run_translation(wb, tmp_path, sheet_configs, fuzzy_threshold, max_rows)
 
 
-def _run_translation(wb, tmp_path, sheet_configs, api_key, fuzzy_threshold, max_rows):
-    engine = get_engine(api_key)
+def _run_translation(wb, tmp_path, sheet_configs, fuzzy_threshold, max_rows):
+    engine = get_engine()
     consistency = get_consistency_engine()
     consistency.reset()
     consistency.lock_batch_from_glossary()
