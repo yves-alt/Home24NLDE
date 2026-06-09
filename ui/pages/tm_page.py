@@ -15,6 +15,14 @@ def render():
             "SELECT category, COUNT(*) as cnt FROM translation_memory GROUP BY category ORDER BY cnt DESC"
         ).fetchall()
 
+    if total == 0:
+        st.warning(
+            "No Translation Memory entries found. "
+            "Use the **Import TM** tab below to upload your TM file (.xlsx or .csv)."
+        )
+    else:
+        st.success(f"Translation Memory active — **{total:,} entries** loaded and ready.")
+
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Total TM Entries", f"{total:,}")
@@ -27,15 +35,18 @@ def render():
 
     st.markdown("---")
 
-    # Show Import TM tab only to admin
+    # Import TM is the first tab — visible to all logged-in users
     user = current_user()
     is_admin = user and user.role == "admin"
 
-    if is_admin:
-        tab1, tab2, tab3, tab4 = st.tabs(["Search TM", "Browse", "Test Matcher", "Import TM"])
-    else:
-        tab1, tab2, tab3 = st.tabs(["Search TM", "Browse", "Test Matcher"])
-        tab4 = None
+    tab_import, tab_search, tab_browse, tab_test = st.tabs(
+        ["⬆️ Import TM", "🔍 Search TM", "📋 Browse", "🧪 Test Matcher"]
+    )
+
+    with tab_import:
+        _render_import_tab()
+
+    tab1, tab2, tab3 = tab_search, tab_browse, tab_test
 
     with tab1:
         query = st.text_input("Search source segment", placeholder="e.g. Duschmatte, Sofa, Mehrfarbig")
@@ -87,11 +98,6 @@ def render():
                 st.success(f"**{test_input}** → **{match.target}**")
             else:
                 st.warning("No TM match found — would fall back to AI.")
-
-    if is_admin and tab4 is not None:
-        with tab4:
-            _render_import_tab()
-
 
 def _render_import_tab():
     st.markdown("### Import Translation Memory")

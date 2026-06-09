@@ -10,6 +10,64 @@ GERMAN_RESIDUE_PATTERNS = [
     (r"\bSitzhöhe\b",                      "zithoogte"),
     (r"\bArmlehnenh(?:ö)he\b",            "armleuninghoogte"),
 
+    # ── Home24 product label + colon forms (highest priority) ────────
+    # These match "Bezug: beige<br>Füße: zwart" style structured lines.
+    # Colon-form must come BEFORE standalone word form.
+    (r"\bBezug\s*:",                       "Bekleding:"),
+    (r"\bFüß(?:e|en)\s*:",                "Poten:"),
+    (r"\bFüss(?:e|en)\s*:",               "Poten:"),
+    (r"\bFuß\s*:",                         "Poot:"),
+    (r"\bGestell\s*:",                     "Frame:"),
+    (r"\bKorpus\s*:",                      "Body:"),
+    (r"\bFarbe\s*:",                       "Kleur:"),
+    (r"\bArbeitsplatte\s*:",               "Werkblad:"),
+    (r"\bSitzfläche\s*:",                  "Zitvlak:"),
+    (r"\bRückenlehne\s*:",                 "Rugleuning:"),
+    (r"\bArmlehne\s*:",                    "Armleuning:"),
+    (r"\bKopfteil\s*:",                    "Hoofdeinde:"),
+    (r"\bMatratze\s*:",                    "Matras:"),
+    (r"\bTischplatte\s*:",                 "Tafelblad:"),
+    (r"\bSchubladen\s*:",                  "Laden:"),
+    (r"\bSchublade\s*:",                   "Lade:"),
+    (r"\bTüren\s*:",                       "Deuren:"),
+    (r"\bTür\s*:",                         "Deur:"),
+    (r"\bLieferumfang\s*:",                "Leveringsomvang:"),
+    (r"\bMaße\s*:",                        "Afmetingen:"),
+    (r"\bBreite\s*:",                      "Breedte:"),
+    (r"\bHöhe\s*:",                        "Hoogte:"),
+    (r"\bTiefe\s*:",                       "Diepte:"),
+
+    # ── Home24 product labels without colon ───────────────────────────
+    (r"\bBezug\b",                         "bekleding"),
+    (r"\bFüße\b",                          "poten"),
+    (r"\bFüsse\b",                         "poten"),
+    (r"\bFuß\b",                           "poot"),
+    (r"\bGestell\b",                       "frame"),
+    (r"\bKorpus\b",                        "body"),
+    (r"\bFarbe\b",                         "kleur"),
+    (r"\bArbeitsplatte\b",                 "werkblad"),
+    (r"\bSitzfläche\b",                    "zitvlak"),
+    (r"\bRückenlehne\b",                   "rugleuning"),
+    (r"\bArmlehne\b",                      "armleuning"),
+    (r"\bKopfteil\b",                      "hoofdeinde"),
+    (r"\bMatratze\b",                      "matras"),
+    (r"\bTischplatte\b",                   "tafelblad"),
+    (r"\bSchubladen\b",                    "laden"),
+    (r"\bSchublade\b",                     "lade"),
+    (r"\bTüren\b",                         "deuren"),
+    (r"\bTür\b",                           "deur"),
+    (r"\bLieferumfang\b",                  "leveringsomvang"),
+    (r"\bMaße\b",                          "afmetingen"),
+    (r"\bBreite\b",                        "breedte"),
+    (r"\bHöhe\b",                          "hoogte"),
+    (r"\bTiefe\b",                         "diepte"),
+    (r"\bMicrofaser\b",                    "microvezel"),
+    (r"\bSamtstoff\b",                     "fluweel"),
+    (r"\bBaumwolle\b",                     "katoen"),
+    (r"\bLeinen\b",                        "linnen"),
+    (r"\bWolle\b",                         "wol"),
+    (r"\bSeide\b",                         "zijde"),
+
     # ── Compounds (specific, high-priority) ───────────────────────────
     (r"\bbestehend\s+aus\b",               "bestaande uit"),
     (r"\bohne\s+Dekoration\b",             "zonder decoratie"),
@@ -68,6 +126,24 @@ GERMAN_RESIDUE_PATTERNS = [
     (r"\bBett\b",                          "bed"),
     (r"\bSofa\b",                          "bank"),
 
+    # ── Wood species / decor suffixes ────────────────────────────────
+    # Compounds first (Eiche Sägerau handled by TM/phrase-mem; standalone below)
+    (r"\bEiche\s+Sägerau\b",              "grof gezaagde eiken"),
+    (r"\bEiche\b",                         "eikenhout"),
+    (r"\bNussbaum\b",                      "notenhout"),
+    (r"\bBuche\b",                         "beukenhout"),
+    (r"\bKiefer\b",                        "grenenhout"),
+    (r"\bFichte\b",                        "vurenhout"),
+    (r"\bAkazie\b",                        "acaciahout"),
+    (r"\bEsche\b",                         "essenhout"),
+    (r"\bEiche(?:n)?holz\b",              "eikenhout"),
+
+    # ── German adjectives common in product text ──────────────────────
+    (r"\bmassiv\b",                        "massief"),
+    (r"\bschön(?:e|em|en|er|es)?\b",      "mooi"),
+    (r"\belegant\b",                       "elegant"),
+    (r"\brobust\b",                        "robuust"),
+
     # ── German material names ─────────────────────────────────────────
     (r"\bMetall\b",                        "metaal"),
     (r"\bHolz\b",                          "hout"),
@@ -124,7 +200,11 @@ DUTCH_CAPITALIZATION_FIXES = [
 # Words that are unambiguously German and must never appear in Dutch output
 CRITICAL_GERMAN_WORDS = re.compile(
     r"\b(?:ohne|Schwarz|Wei[ßs]s?|Grau|Hellgrau|Dunkelgrau|Braun|Grün|Gelb|Blau|Rot|Dekor"
-    r"|Metall|Holz|Leder|Kunststoff|pulverbeschichtet|lackiert|beschichtet|Eiche|Nussbaum)\b",
+    r"|Metall|Holz|Leder|Kunststoff|pulverbeschichtet|lackiert|beschichtet|Eiche|Nussbaum"
+    r"|Bezug|Füße|Füsse|Fuß|Gestell|Korpus|Farbe|Microfaser"
+    r"|Schublade|Schubladen|Lieferumfang|Maße|Breite|Höhe|Tiefe"
+    r"|Arbeitsplatte|Sitzfläche|Rückenlehne|Armlehne|Kopfteil|Tischplatte|Matratze"
+    r"|Baumwolle|Leinen|Wolle|Samtstoff)\b",
     re.IGNORECASE,
 )
 

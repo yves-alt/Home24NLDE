@@ -118,7 +118,7 @@ _STATE_KEYS = [
     "t_original_preview", "t_xl_bytes", "t_csv_bytes", "t_stats",
     "t_headers", "t_data_rows", "t_version",
     "t_detected_sheet", "t_detection_scored",
-    "t_plan", "t_coverage",
+    "t_plan", "t_coverage", "t_qa_report",
 ]
 
 
@@ -149,12 +149,27 @@ def render():
 
 def _render_upload():
     from auth.credentials import get_openai_key
+    from database.database import get_connection
 
     if not get_openai_key():
         st.markdown(
             '<div class="alert-warning">OpenAI API key not configured. TM-only mode active.</div>',
             unsafe_allow_html=True,
         )
+
+    # TM status banner
+    try:
+        with get_connection() as conn:
+            tm_count = conn.execute("SELECT COUNT(*) FROM translation_memory").fetchone()[0]
+        if tm_count == 0:
+            st.warning(
+                "No Translation Memory imported yet. "
+                "Go to **Translation Memory → Import TM** to upload your TM file and improve translation quality."
+            )
+        else:
+            st.info(f"Translation Memory active: **{tm_count:,} entries**")
+    except Exception:
+        pass
 
     uploaded = st.file_uploader(
         "Upload German Excel file",
@@ -338,6 +353,9 @@ def _run_translation(
     # Build per-column coverage stats
     coverage = _build_coverage(preview_rows, data_rows, translatable_cols)
 
+    # Run quality gate before preview — auto-corrects residue and flags blockers
+    preview_rows, qa_report = _run_quality_gate(preview_rows)
+
     st.session_state["t_file_bytes"] = file_bytes
     st.session_state["t_filename"] = filename
     st.session_state["t_headers"] = raw_headers
@@ -353,6 +371,7 @@ def _run_translation(
     st.session_state["t_detection_scored"] = scored
     st.session_state["t_plan"] = plan
     st.session_state["t_coverage"] = coverage
+    st.session_state["t_qa_report"] = qa_report
 
     for k in [k for k in st.session_state if k.startswith("preview_editor_")]:
         del st.session_state[k]
@@ -428,6 +447,27 @@ def _render_preview():
     c3.metric("Phrase / Corpus", stats.get("phrase_hits", 0) + stats.get("corpus_hits", 0))
     c4.metric("AI (GPT)", stats.get("ai_hits", 0))
     c5.metric("Total cells", stats.get("total_cells", 0))
+
+    # QA report (residue gate results)
+    qa_report: dict | None = st.session_state.get("t_qa_report")
+    if qa_report:
+        corr = qa_report.get("corrections_made", 0)
+        warnings = qa_report.get("warnings", [])
+        blocked = qa_report.get("blocked", False)
+
+        if corr:
+            st.info(f"Quality gate auto-corrected **{corr}** cell(s) — German labels and residues normalized.")
+
+        if blocked:
+            st.error(
+                f"**{len(warnings)} cell(s) still contain German residue after auto-correction. "
+                "Export is blocked. Fix the highlighted cells before downloading.**"
+            )
+            with st.expander(f"German residue details ({len(warnings)} issue(s))", expanded=True):
+                for w in warnings:
+                    st.error(w)
+        elif corr == 0 and not warnings:
+            st.success("Quality gate passed — no German residue detected.")
 
     # Column coverage report
     if coverage:
@@ -560,49 +600,58 @@ def _render_preview():
 
 # ── Final quality gate ─────────────────────────────────────────────────
 
-def _run_quality_gate(rows: list) -> list:
-    """Auto-correct residue and MDF issues; show warnings for anything unfixable."""
+def _run_quality_gate(rows: list) -> tuple[list, dict]:
+    """Auto-correct German residue + label issues. Return (rows, qa_report).
+
+    qa_report keys: corrections_made, warnings (list[str]), blocked (bool).
+    Export must be blocked when blocked=True.
+    """
     from engines.residue_detector import get_residue_detector
-    from engines.qa_engine import normalize_mdf_nl
+    from engines.qa_engine import normalize_mdf_nl, normalize_home24_labels_nl, has_critical_label_residue
 
     detector = get_residue_detector()
     corrections_made = 0
-    gate_warnings = []
+    gate_warnings: list[str] = []
 
     for row in rows:
         dutch = (row.get("Dutch translation") or "").strip()
         if not dutch:
             continue
 
-        # MDF normalization
-        fixed = normalize_mdf_nl(dutch)
+        # Layer 1: deterministic label normalization (Bezug→Bekleding, Füße→Poten, etc.)
+        fixed = normalize_home24_labels_nl(dutch)
 
-        # German residue auto-fix
-        residue = detector.detect_and_clean(fixed, auto_fix=True)
-        fixed = residue.text
+        # Layer 2: MDF normalization
+        fixed = normalize_mdf_nl(fixed)
+
+        # Layer 3: full residue auto-fix (colors, materials, function words)
+        residue_result = detector.detect_and_clean(fixed, auto_fix=True)
+        fixed = residue_result.text
 
         if fixed != dutch:
             row["Dutch translation"] = fixed
             corrections_made += 1
 
-        # Anything still remaining after auto-fix?
-        remaining = detector.has_critical_residue(fixed)
-        if remaining:
+        # Check what's still unresolved after all auto-fixes
+        critical_words = detector.has_critical_residue(fixed)
+        critical_labels = has_critical_label_residue(fixed)
+        still_german = list(dict.fromkeys(critical_words + critical_labels))  # dedup, preserve order
+
+        if still_german:
             gate_warnings.append(
-                f"Row {row['Row']}, '{row['Column']}': critical German residue {remaining} — please correct manually"
+                f"Row {row['Row']}, '{row['Column']}': "
+                f"unresolved German → {still_german} | text: {fixed[:80]!r}"
             )
 
-    if corrections_made:
-        st.info(f"Quality gate auto-corrected {corrections_made} cell(s) (German residue / MDF normalization).")
+    blocked = len(gate_warnings) > 0
 
-    if gate_warnings:
-        st.warning(f"{len(gate_warnings)} cell(s) have German residue that could not be auto-corrected:")
-        for w in gate_warnings[:10]:
-            st.error(w)
-        if len(gate_warnings) > 10:
-            st.error(f"… and {len(gate_warnings) - 10} more. Please fix before downloading.")
+    report = {
+        "corrections_made": corrections_made,
+        "warnings": gate_warnings,
+        "blocked": blocked,
+    }
 
-    return rows
+    return rows, report
 
 
 # ── Validate & generate ────────────────────────────────────────────────
@@ -652,8 +701,23 @@ def _validate_and_generate(current_rows: list):
         st.error("Export blocked. Fix coverage gaps before downloading.")
         return
 
-    # Final quality gate — run residue detector and MDF normalizer on all Dutch translations
-    current_rows = _run_quality_gate(current_rows)
+    # Final quality gate — mandatory before any file generation
+    current_rows, qa_report = _run_quality_gate(current_rows)
+    st.session_state["t_qa_report"] = qa_report
+
+    if qa_report["corrections_made"]:
+        st.info(f"Quality gate auto-corrected {qa_report['corrections_made']} cell(s).")
+
+    if qa_report["blocked"]:
+        st.error(
+            f"**Export blocked: {len(qa_report['warnings'])} cell(s) still contain German residue "
+            "after auto-correction. Fix the cells manually and click Validate again.**"
+        )
+        for w in qa_report["warnings"][:10]:
+            st.error(w)
+        if len(qa_report["warnings"]) > 10:
+            st.error(f"… and {len(qa_report['warnings']) - 10} more.")
+        return
 
     if corrections:
         _save_corrections(corrections, correction_lookup)

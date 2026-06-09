@@ -66,6 +66,100 @@ def normalize_mdf_nl(text: str) -> str:
     return text
 
 
+# ── Home24 label normalizer ───────────────────────────────────────────
+# Colon-form patterns FIRST so "Bezug: blau" doesn't partially match
+# the standalone "Bezug" pattern.
+_HOME24_LABEL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # ── Label + colon (structural lines like "Bezug: beige<br>Füße: zwart") ──
+    (re.compile(r"\bBezug\s*:",          re.IGNORECASE), "Bekleding:"),
+    (re.compile(r"\bFüß(?:e|en)\s*:",   re.IGNORECASE), "Poten:"),
+    (re.compile(r"\bFüss(?:e|en)\s*:",  re.IGNORECASE), "Poten:"),
+    (re.compile(r"\bFuß\s*:",            re.IGNORECASE), "Poot:"),
+    (re.compile(r"\bGestell\s*:",        re.IGNORECASE), "Frame:"),
+    (re.compile(r"\bKorpus\s*:",         re.IGNORECASE), "Body:"),
+    (re.compile(r"\bFarbe\s*:",          re.IGNORECASE), "Kleur:"),
+    (re.compile(r"\bMaterial\s*:",       re.IGNORECASE), "Materiaal:"),
+    (re.compile(r"\bArbeitsplatte\s*:",  re.IGNORECASE), "Werkblad:"),
+    (re.compile(r"\bSitzfläche\s*:",     re.IGNORECASE), "Zitvlak:"),
+    (re.compile(r"\bRückenlehne\s*:",    re.IGNORECASE), "Rugleuning:"),
+    (re.compile(r"\bArmlehne\s*:",       re.IGNORECASE), "Armleuning:"),
+    (re.compile(r"\bKopfteil\s*:",       re.IGNORECASE), "Hoofdeinde:"),
+    (re.compile(r"\bMatratze\s*:",       re.IGNORECASE), "Matras:"),
+    (re.compile(r"\bTischplatte\s*:",    re.IGNORECASE), "Tafelblad:"),
+    (re.compile(r"\bSchubladen\s*:",     re.IGNORECASE), "Laden:"),
+    (re.compile(r"\bSchublade\s*:",      re.IGNORECASE), "Lade:"),
+    (re.compile(r"\bTüren\s*:",          re.IGNORECASE), "Deuren:"),
+    (re.compile(r"\bTür\s*:",            re.IGNORECASE), "Deur:"),
+    (re.compile(r"\bLieferumfang\s*:",   re.IGNORECASE), "Leveringsomvang:"),
+    (re.compile(r"\bMaße\s*:",           re.IGNORECASE), "Afmetingen:"),
+    (re.compile(r"\bBreite\s*:",         re.IGNORECASE), "Breedte:"),
+    (re.compile(r"\bHöhe\s*:",           re.IGNORECASE), "Hoogte:"),
+    (re.compile(r"\bTiefe\s*:",          re.IGNORECASE), "Diepte:"),
+    # ── Standalone labels (without colon) ────────────────────────────
+    (re.compile(r"\bBezug\b",            re.IGNORECASE), "bekleding"),
+    (re.compile(r"\bFüße\b",             re.IGNORECASE), "poten"),
+    (re.compile(r"\bFüsse\b",            re.IGNORECASE), "poten"),
+    (re.compile(r"\bFuß\b",              re.IGNORECASE), "poot"),
+    (re.compile(r"\bGestell\b",          re.IGNORECASE), "frame"),
+    (re.compile(r"\bKorpus\b",           re.IGNORECASE), "body"),
+    (re.compile(r"\bFarbe\b",            re.IGNORECASE), "kleur"),
+    (re.compile(r"\bMaterial\b",         re.IGNORECASE), "materiaal"),
+    (re.compile(r"\bArbeitsplatte\b",    re.IGNORECASE), "werkblad"),
+    (re.compile(r"\bSitzfläche\b",       re.IGNORECASE), "zitvlak"),
+    (re.compile(r"\bRückenlehne\b",      re.IGNORECASE), "rugleuning"),
+    (re.compile(r"\bArmlehne\b",         re.IGNORECASE), "armleuning"),
+    (re.compile(r"\bKopfteil\b",         re.IGNORECASE), "hoofdeinde"),
+    (re.compile(r"\bMatratze\b",         re.IGNORECASE), "matras"),
+    (re.compile(r"\bTischplatte\b",      re.IGNORECASE), "tafelblad"),
+    (re.compile(r"\bSchubladen\b",       re.IGNORECASE), "laden"),
+    (re.compile(r"\bSchublade\b",        re.IGNORECASE), "lade"),
+    (re.compile(r"\bTüren\b",            re.IGNORECASE), "deuren"),
+    (re.compile(r"\bTür\b",              re.IGNORECASE), "deur"),
+    (re.compile(r"\bLieferumfang\b",     re.IGNORECASE), "leveringsomvang"),
+    (re.compile(r"\bMaße\b",             re.IGNORECASE), "afmetingen"),
+    (re.compile(r"\bBreite\b",           re.IGNORECASE), "breedte"),
+    (re.compile(r"\bHöhe\b",             re.IGNORECASE), "hoogte"),
+    (re.compile(r"\bTiefe\b",            re.IGNORECASE), "diepte"),
+    # ── Material / textile terms ──────────────────────────────────────
+    (re.compile(r"\bMicrofaser\b",       re.IGNORECASE), "microvezel"),
+    (re.compile(r"\bVelours\b",          re.IGNORECASE), "velours"),
+    (re.compile(r"\bSamtstoff\b",        re.IGNORECASE), "fluweel"),
+    (re.compile(r"\bBaumwolle\b",        re.IGNORECASE), "katoen"),
+    (re.compile(r"\bLeinen\b",           re.IGNORECASE), "linnen"),
+    (re.compile(r"\bWolle\b",            re.IGNORECASE), "wol"),
+    (re.compile(r"\bSeide\b",            re.IGNORECASE), "zijde"),
+]
+
+# German labels that must never appear in exported NL output
+_CRITICAL_LABEL_RE = re.compile(
+    r"\b(?:Bezug|Füße|Füsse|Fuß|Gestell|Korpus|Farbe|Microfaser"
+    r"|Schublade|Schubladen|Lieferumfang|Maße|Breite|Höhe|Tiefe"
+    r"|Arbeitsplatte|Sitzfläche|Rückenlehne|Armlehne|Kopfteil|Tischplatte"
+    r"|Matratze|Baumwolle|Leinen|Wolle|Samtstoff)\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_home24_labels_nl(text: str) -> str:
+    """Translate German product/furniture labels to Dutch deterministically.
+
+    Handles both the colon-label form (Bezug: beige → Bekleding: beige)
+    and standalone form (Bezug → bekleding).
+    Preserves <br>, colons, dimensions, and overall structure.
+    """
+    if not text:
+        return text
+    result = text
+    for pat, replacement in _HOME24_LABEL_PATTERNS:
+        result = pat.sub(replacement, result)
+    return result
+
+
+def has_critical_label_residue(text: str) -> list[str]:
+    """Return list of critical German labels still present in text."""
+    return _CRITICAL_LABEL_RE.findall(text)
+
+
 @dataclass
 class QAIssue:
     issue_type: str

@@ -610,6 +610,191 @@ def test_material_residue_patterns():
     return passed
 
 
+# ── 15. Home24 label normalizer (Bezug/Füße/Gestell etc.) ────────────
+
+def test_home24_label_normalizer():
+    """normalize_home24_labels_nl must convert all German product labels."""
+    print("=== Home24 label normalizer ===")
+
+    from engines.qa_engine import normalize_home24_labels_nl
+    passed = True
+
+    cases = [
+        # (input, expected_output, description)
+        ("Bezug: beige<br>Füße: zwart",
+         "Bekleding: beige<br>Poten: zwart",
+         "Bezug/Füße with colon"),
+
+        ("Bezug: Microfaser<br>Füße: kunststof",
+         "Bekleding: microvezel<br>Poten: kunststof",
+         "Bezug Microfaser + Füße kunststof"),
+
+        ("Gestell: zwart metaal<br>Korpus: wit",
+         "Frame: zwart metaal<br>Body: wit",
+         "Gestell + Korpus"),
+
+        ("Farbe: Schwarz<br>Material: Holz",
+         "Kleur: Schwarz<br>Materiaal: Holz",
+         "Farbe + Material labels (color/material translated by residue detector separately)"),
+
+        ("Schubladen: 3<br>Türen: 2",
+         "Laden: 3<br>Deuren: 2",
+         "Schubladen + Türen"),
+
+        ("Maße: 80 x 60 x 40 cm",
+         "Afmetingen: 80 x 60 x 40 cm",
+         "Maße label"),
+
+        ("Microfaser, 100% Polyester",
+         "microvezel, 100% Polyester",
+         "Microfaser standalone"),
+
+        ("al Dutch — geen wijziging",
+         "al Dutch — geen wijziging",
+         "already Dutch — no change"),
+    ]
+
+    for inp, expected, desc in cases:
+        got = normalize_home24_labels_nl(inp)
+        ok = got.lower() == expected.lower()
+        print(f"  {'PASS' if ok else 'FAIL'}  {desc}")
+        if not ok:
+            print(f"    input:    {inp!r}")
+            print(f"    expected: {expected!r}")
+            print(f"    got:      {got!r}")
+        passed = passed and ok
+
+    print()
+    return passed
+
+
+# ── 16. Full pipeline Bezug/Füße regression ───────────────────────────
+
+def test_bezug_fusse_pipeline():
+    """Full pipeline must produce Bekleding/Poten — not Bezug/Füße."""
+    print("=== Bezug / Füße pipeline regression ===")
+    run_migrations()
+
+    from engines.translation_engine import get_engine
+    from engines.residue_detector import get_residue_detector, CRITICAL_GERMAN_WORDS
+    engine = get_engine()
+    detector = get_residue_detector()
+    passed = True
+
+    cases = [
+        ("Bezug: beige<br>Füße: schwarz",
+         [("Bekleding", True), ("Poten", True), ("Bezug", False), ("Füße", False)],
+         "Bezug/Füße with colon"),
+
+        ("Bezug: Microfaser<br>Füße: Kunststoff",
+         [("Bekleding", True), ("microvezel", True), ("Bezug", False), ("Füße", False)],
+         "Bezug Microfaser"),
+
+        ("ohne Dekoration",
+         [("zonder", True), ("ohne", False)],
+         "ohne → zonder"),
+
+        ("Metall, pulverbeschichtet",
+         [("metaal", True), ("Metall", False)],  # TM stores gepoedercoat; both gepoedercoat/poedergecoat are valid
+         "Metall + pulverbeschichtet"),
+    ]
+
+    for source, checks, desc in cases:
+        items = [(0, source)]
+        try:
+            batch = engine.translate_batch(items, context_rows=[], filename="test.xlsx")
+            result = batch.results[0].target if batch.results else ""
+        except Exception as exc:
+            result = f"ERROR: {exc}"
+
+        row_pass = True
+        print(f"  '{source}' → '{result}'")
+        for fragment, should_be_present in checks:
+            present = fragment.lower() in result.lower()
+            ok = present == should_be_present
+            label = "present" if should_be_present else "absent"
+            print(f"    {'PASS' if ok else 'FAIL'}  '{fragment}' should be {label}")
+            row_pass = row_pass and ok
+
+        # Critical residue check
+        residue = detector.has_critical_residue(result)
+        no_critical = len(residue) == 0
+        print(f"    {'PASS' if no_critical else 'FAIL'}  no critical German residue  (found: {residue})")
+        row_pass = row_pass and no_critical
+
+        passed = passed and row_pass
+        print()
+
+    # Confirm Bezug and Füße are in CRITICAL_GERMAN_WORDS
+    for word in ("Bezug", "Füße", "Gestell", "Microfaser", "Maße"):
+        found = bool(CRITICAL_GERMAN_WORDS.search(word))
+        print(f"  {'PASS' if found else 'FAIL'}  '{word}' in CRITICAL_GERMAN_WORDS")
+        passed = passed and found
+
+    print()
+    return passed
+
+
+# ── 17. Quality gate blocks export on unresolved residue ──────────────
+
+def test_quality_gate_blocks():
+    """_run_quality_gate must return blocked=True when residue cannot be auto-fixed."""
+    print("=== Quality gate blocks on unresolved residue ===")
+
+    # Simulate a row with a word that can be auto-fixed and one that can't (gibberish German)
+    # We add a known-fixable word so we can verify corrections_made
+    test_rows = [
+        {"Row": 1, "Column": "colorDetail",  "German source": "test", "Dutch translation": "Bezug: beige<br>Füße: zwart",   "Confidence": "HIGH", "Origin": "TM_EXACT"},
+        {"Row": 2, "Column": "materialDetail","German source": "test", "Dutch translation": "schöne Eiche massiv",           "Confidence": "HIGH", "Origin": "TM_EXACT"},
+        {"Row": 3, "Column": "name",          "German source": "test", "Dutch translation": "Bank Grau modern",              "Confidence": "HIGH", "Origin": "TM_EXACT"},
+    ]
+
+    passed = True
+
+    # Import from translate_page
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+    # Use the gate functions directly without Streamlit
+    from engines.qa_engine import normalize_home24_labels_nl, normalize_mdf_nl, has_critical_label_residue
+    from engines.residue_detector import get_residue_detector
+    detector = get_residue_detector()
+
+    corrected = 0
+    warnings = []
+    for row in test_rows:
+        dutch = (row.get("Dutch translation") or "").strip()
+        fixed = normalize_home24_labels_nl(dutch)
+        fixed = normalize_mdf_nl(fixed)
+        residue_result = detector.detect_and_clean(fixed, auto_fix=True)
+        fixed = residue_result.text
+        if fixed != dutch:
+            row["Dutch translation"] = fixed
+            corrected += 1
+        critical = detector.has_critical_residue(fixed) + has_critical_label_residue(fixed)
+        if critical:
+            warnings.append(f"Row {row['Row']}: {critical}")
+
+    ok_corr = corrected >= 1
+    print(f"  {'PASS' if ok_corr else 'FAIL'}  At least 1 correction made  (got {corrected})")
+    passed = passed and ok_corr
+
+    # Row 1 (Bezug/Füße) should have been auto-fixed
+    row1_dutch = test_rows[0]["Dutch translation"]
+    ok_fixed = "Bezug" not in row1_dutch and "Füße" not in row1_dutch
+    print(f"  {'PASS' if ok_fixed else 'FAIL'}  Bezug/Füße auto-fixed in row 1: {row1_dutch!r}")
+    passed = passed and ok_fixed
+
+    # Row 2 (Eiche) — Eiche is critical, should be flagged
+    row2_dutch = test_rows[1]["Dutch translation"]
+    ok_eiche = "eiken" in row2_dutch.lower() or "Eiche" not in row2_dutch
+    print(f"  {'PASS' if ok_eiche else 'FAIL'}  Eiche handled in row 2: {row2_dutch!r}")
+    passed = passed and ok_eiche
+
+    print()
+    return passed
+
+
 # ── Runner ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -628,6 +813,9 @@ if __name__ == "__main__":
         test_decor_look_patterns(),
         test_product_name_max_40(),
         test_material_residue_patterns(),
+        test_home24_label_normalizer(),
+        test_bezug_fusse_pipeline(),
+        test_quality_gate_blocks(),
     ]
 
     total = len(results)

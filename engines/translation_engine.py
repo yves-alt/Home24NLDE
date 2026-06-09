@@ -582,8 +582,9 @@ class TranslationEngine:
         # Metadata leak safety net
         translation = _strip_metadata_leaks(translation)
 
-        # MDF normalization
-        from engines.qa_engine import normalize_mdf_nl
+        # MDF normalization + Home24 label normalization
+        from engines.qa_engine import normalize_mdf_nl, normalize_home24_labels_nl
+        translation = normalize_home24_labels_nl(translation)
         translation = normalize_mdf_nl(translation)
 
         # Naturalness rewrite
