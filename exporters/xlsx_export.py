@@ -1,3 +1,4 @@
+import io
 import os
 from pathlib import Path
 from datetime import datetime
@@ -99,6 +100,40 @@ def export_workbook(
     out_wb.save(str(output_path))
     source_wb.close()
     return str(output_path)
+
+
+def export_workbook_translated_bytes(
+    original_bytes: bytes,
+    translation_map: dict,
+    headers: list,
+    sheet_name: str = "Tabelle1",
+) -> bytes:
+    """Return translated Excel as bytes.
+
+    Modifies sheet_name in-place on a copy of the original workbook.
+    translation_map: {row_idx (0-based data row): {col_name: dutch_value}}
+    headers: ordered list of column names from row 1 of sheet_name.
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(original_bytes), data_only=True)
+
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"Sheet '{sheet_name}' not found in workbook")
+
+    ws = wb[sheet_name]
+
+    # Build header → 1-based column index map
+    col_map = {h: idx + 1 for idx, h in enumerate(headers) if h}
+
+    for row_idx, col_translations in translation_map.items():
+        # row_idx is 0-based data row; Excel row = +2 (1-based + header)
+        xl_row = row_idx + 2
+        for col_name, dutch_value in col_translations.items():
+            if col_name in col_map:
+                ws.cell(row=xl_row, column=col_map[col_name], value=dutch_value)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def _write_header(ws, headers: list):
