@@ -1,4 +1,6 @@
 import io
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -6,18 +8,9 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-# Columns used to detect whether a sheet is a Home24 product sheet.
-HOME24_DETECTION_COLUMNS = frozenset({
-    "articleNumber", "name", "variantName", "materialDetail", "colorDetail",
-    "deliveryScope", "qualityDetail", "otherMeasurements",
-    "textileCompositionCover1", "internalDimensionDrawer",
-    "externalDimension", "weightNetto", "weightBrutto",
-    "colorName", "descriptionBullet1", "descriptionBullet2",
-})
+# ── Single source of truth for columns ────────────────────────────────
 
-# Columns we actually translate (articleNumber is detected but never changed).
-ALLOWED_COLUMNS = [
-    "articleNumber",
+TRANSLATABLE_COLUMNS_NL = frozenset({
     "name",
     "colorDetail",
     "deliveryScope",
@@ -25,14 +18,107 @@ ALLOWED_COLUMNS = [
     "qualityDetail",
     "textileCompositionCover1",
     "variantName",
-]
-TRANSLATE_COLUMNS = [c for c in ALLOWED_COLUMNS if c != "articleNumber"]
+    "materialDetail",
+    "textileComposition",
+})
+
+PROTECTED_COLUMNS = frozenset({
+    "articleNumber", "sku", "id", "ean", "gtin",
+})
+
+# Detection set = everything we translate + everything we protect + extra structural cols
+HOME24_DETECTION_COLUMNS = TRANSLATABLE_COLUMNS_NL | PROTECTED_COLUMNS | frozenset({
+    "internalDimensionDrawer", "externalDimension", "weightNetto", "weightBrutto",
+    "colorName", "descriptionBullet1", "descriptionBullet2",
+})
+
+
+# ── Header normalization ───────────────────────────────────────────────
+
+def _norm(h: str) -> str:
+    """Trim, strip hidden chars, lowercase — for case-insensitive matching."""
+    return h.strip().replace("​", "").replace("\xa0", " ").lower()
+
+
+def _resolve_columns(raw_headers: list[str]) -> tuple[list[str], list[str]]:
+    """Return (translatable_originals, protected_originals) via case-insensitive match.
+
+    Returns original header names so row dicts stay compatible.
+    """
+    trans_norm = {_norm(c): c for c in TRANSLATABLE_COLUMNS_NL}
+    prot_norm = {_norm(c): c for c in PROTECTED_COLUMNS}
+    translatable, protected = [], []
+    for h in raw_headers:
+        n = _norm(h)
+        if n in trans_norm:
+            translatable.append(h)
+        elif n in prot_norm:
+            protected.append(h)
+    return translatable, protected
+
+
+# ── TranslationPlan ────────────────────────────────────────────────────
+
+@dataclass
+class TranslationPlan:
+    sheet_name: str
+    translatable_cols: list = field(default_factory=list)
+    protected_cols: list = field(default_factory=list)
+    cell_counts: dict = field(default_factory=dict)   # col -> non-empty source count
+
+    @property
+    def total_expected(self) -> int:
+        return sum(self.cell_counts.values())
+
+
+# ── Sheet detection ────────────────────────────────────────────────────
+
+def _detect_best_sheet(file_bytes: bytes) -> tuple[str | None, list[tuple[str, int, list[str]]]]:
+    """Score every sheet and return the best match.
+
+    Returns (best_sheet_name or None, scored_list).
+    scored_list items: (sheet_name, score, matched_column_names)
+    None = ambiguous — caller must show a selector.
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    scored: list[tuple[str, int, list[str]]] = []
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not first_row:
+            scored.append((sheet_name, 0, []))
+            continue
+        raw = [str(c).strip() for c in first_row if c is not None and str(c).strip()]
+        det_norm = {_norm(c): c for c in HOME24_DETECTION_COLUMNS}
+        matched = sorted({det_norm[_norm(h)] for h in raw if _norm(h) in det_norm})
+        scored.append((sheet_name, len(matched), matched))
+
+    wb.close()
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    if len(scored) == 1:
+        return scored[0][0], scored
+
+    best_score = scored[0][1]
+    if best_score == 0:
+        return None, scored
+
+    top = [s for s in scored if s[1] == best_score]
+    if len(top) == 1:
+        return top[0][0], scored
+
+    return None, scored
+
+
+# ── Session state ──────────────────────────────────────────────────────
 
 _STATE_KEYS = [
     "t_step", "t_filename", "t_file_bytes", "t_preview_rows",
     "t_original_preview", "t_xl_bytes", "t_csv_bytes", "t_stats",
     "t_headers", "t_data_rows", "t_version",
     "t_detected_sheet", "t_detection_scored",
+    "t_plan", "t_coverage",
 ]
 
 
@@ -59,53 +145,7 @@ def render():
         _render_preview()
 
 
-# ── Sheet detection ────────────────────────────────────────────────────
-
-
-def _detect_best_sheet(file_bytes: bytes) -> tuple[str | None, list[tuple[str, int, list[str]]]]:
-    """Score every sheet and return the best match.
-
-    Returns (best_sheet_name or None, scored_list).
-    scored_list items: (sheet_name, score, matched_column_names)
-    None means ambiguous — caller must show a selector.
-    """
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
-    scored: list[tuple[str, int, list[str]]] = []
-
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        if not first_row:
-            scored.append((sheet_name, 0, []))
-            continue
-        headers = {str(c).strip() for c in first_row if c is not None and str(c).strip()}
-        matched = sorted(headers & HOME24_DETECTION_COLUMNS)
-        scored.append((sheet_name, len(matched), matched))
-
-    wb.close()
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    # Single sheet → always use it regardless of score
-    if len(scored) == 1:
-        return scored[0][0], scored
-
-    best_score = scored[0][1]
-
-    # No Home24 columns detected in any sheet → need user input
-    if best_score == 0:
-        return None, scored
-
-    # Clear unique winner
-    top = [s for s in scored if s[1] == best_score]
-    if len(top) == 1:
-        return top[0][0], scored
-
-    # Tie → need user input
-    return None, scored
-
-
 # ── Upload ─────────────────────────────────────────────────────────────
-
 
 def _render_upload():
     from auth.credentials import get_openai_key
@@ -133,7 +173,6 @@ def _render_upload():
 
     file_bytes = uploaded.getvalue()
 
-    # Detect best sheet
     try:
         detected_sheet, scored = _detect_best_sheet(file_bytes)
     except Exception as e:
@@ -143,7 +182,6 @@ def _render_upload():
     st.success(f"File ready: **{uploaded.name}**")
 
     if detected_sheet:
-        # Single clear winner — show info and proceed
         _, score, matched = next((s for s in scored if s[0] == detected_sheet), (None, 0, []))
         if len(scored) > 1:
             st.info(
@@ -152,7 +190,6 @@ def _render_upload():
             )
         selected_sheet = detected_sheet
     else:
-        # Ambiguous — show selector with scores
         sheet_labels = [
             f"{name} (score: {score})" if score > 0 else name
             for name, score, _ in scored
@@ -169,7 +206,6 @@ def _render_upload():
 
 
 # ── Translation ────────────────────────────────────────────────────────
-
 
 def _run_translation(
     file_bytes: bytes,
@@ -196,21 +232,37 @@ def _run_translation(
         st.error(f"Sheet '{sheet_name}' has no data rows.")
         return
 
-    headers = [str(c) if c is not None else "" for c in all_rows[0]]
-    cols_to_translate = [c for c in TRANSLATE_COLUMNS if c in headers]
+    raw_headers = [str(c) if c is not None else "" for c in all_rows[0]]
+    translatable_cols, protected_cols = _resolve_columns(raw_headers)
 
-    if not cols_to_translate:
+    if not translatable_cols:
         st.error(
             f"No translatable columns found in '{sheet_name}'.\n"
-            f"Expected: {', '.join(TRANSLATE_COLUMNS)}\n"
-            f"Found: {', '.join(h for h in headers if h)}"
+            f"Expected any of: {', '.join(sorted(TRANSLATABLE_COLUMNS_NL))}\n"
+            f"Found: {', '.join(h for h in raw_headers if h)}"
         )
         return
 
     data_rows = [
-        {headers[i]: row[i] for i in range(min(len(headers), len(row)))}
+        {raw_headers[i]: row[i] for i in range(min(len(raw_headers), len(row)))}
         for row in all_rows[1:]
     ]
+
+    # Build TranslationPlan — count non-empty source cells per column
+    cell_counts = {}
+    for col in translatable_cols:
+        count = sum(
+            1 for row in data_rows
+            if row.get(col) is not None and str(row.get(col, "")).strip()
+        )
+        cell_counts[col] = count
+
+    plan = TranslationPlan(
+        sheet_name=sheet_name,
+        translatable_cols=translatable_cols,
+        protected_cols=protected_cols,
+        cell_counts=cell_counts,
+    )
 
     from engines.translation_engine import get_engine
     from engines.consistency_engine import get_consistency_engine
@@ -229,15 +281,18 @@ def _run_translation(
 
     overall_progress = st.progress(0.0)
     status_text = st.empty()
-    total_cols = len(cols_to_translate)
+    total_cols = len(translatable_cols)
 
-    for col_idx, col_name in enumerate(cols_to_translate):
-        status_text.text(f"Translating '{col_name}' ({col_idx + 1}/{total_cols})…")
+    for col_idx, col_name in enumerate(translatable_cols):
+        status_text.text(
+            f"Translating '{col_name}' ({col_idx + 1}/{total_cols}) "
+            f"— {cell_counts.get(col_name, 0)} cells…"
+        )
 
         items = [
             (row_idx, str(row.get(col_name, "")).strip())
             for row_idx, row in enumerate(data_rows)
-            if row.get(col_name) and str(row.get(col_name, "")).strip()
+            if row.get(col_name) is not None and str(row.get(col_name, "")).strip()
         ]
 
         if not items:
@@ -279,9 +334,12 @@ def _run_translation(
     overall_progress.progress(1.0)
     status_text.text("Translation complete.")
 
+    # Build per-column coverage stats
+    coverage = _build_coverage(preview_rows, data_rows, translatable_cols)
+
     st.session_state["t_file_bytes"] = file_bytes
     st.session_state["t_filename"] = filename
-    st.session_state["t_headers"] = headers
+    st.session_state["t_headers"] = raw_headers
     st.session_state["t_data_rows"] = data_rows
     st.session_state["t_preview_rows"] = preview_rows
     st.session_state["t_original_preview"] = [dict(r) for r in preview_rows]
@@ -292,6 +350,8 @@ def _run_translation(
     st.session_state["t_step"] = "preview"
     st.session_state["t_detected_sheet"] = sheet_name
     st.session_state["t_detection_scored"] = scored
+    st.session_state["t_plan"] = plan
+    st.session_state["t_coverage"] = coverage
 
     for k in [k for k in st.session_state if k.startswith("preview_editor_")]:
         del st.session_state[k]
@@ -299,8 +359,54 @@ def _run_translation(
     st.rerun()
 
 
-# ── Preview + export ───────────────────────────────────────────────────
+# ── Coverage helpers ───────────────────────────────────────────────────
 
+def _build_coverage(
+    preview_rows: list,
+    data_rows: list,
+    translatable_cols: list,
+) -> list[dict]:
+    """Build per-column coverage report rows."""
+    translated_counter = Counter(r["Column"] for r in preview_rows)
+    unchanged_counter = Counter(
+        r["Column"] for r in preview_rows
+        if r["German source"] == r["Dutch translation"]
+    )
+
+    rows = []
+    for col in translatable_cols:
+        source_ne = sum(
+            1 for row in data_rows
+            if row.get(col) is not None and str(row.get(col, "")).strip()
+        )
+        translated = translated_counter.get(col, 0)
+        unchanged = unchanged_counter.get(col, 0)
+        rows.append({
+            "Column": col,
+            "Source cells": source_ne,
+            "Translated": translated,
+            "Unchanged": unchanged,
+            "Coverage": f"{translated}/{source_ne}" if source_ne else "—",
+            "_ok": translated >= source_ne,
+        })
+    return rows
+
+
+def _validate_coverage(
+    preview_rows: list,
+    data_rows: list,
+    translatable_cols: list,
+) -> list[str]:
+    """Return list of error strings for any column with missing translations."""
+    coverage = _build_coverage(preview_rows, data_rows, translatable_cols)
+    return [
+        f"'{r['Column']}': {r['Translated']} translated, {r['Source cells']} expected"
+        for r in coverage
+        if not r["_ok"] and r["Source cells"] > 0
+    ]
+
+
+# ── Preview ────────────────────────────────────────────────────────────
 
 def _render_preview():
     from auth.session import current_user
@@ -310,6 +416,8 @@ def _render_preview():
     preview_rows = st.session_state.get("t_preview_rows") or []
     version = st.session_state.get("t_version") or 0
     detected_sheet = st.session_state.get("t_detected_sheet") or "—"
+    plan: TranslationPlan | None = st.session_state.get("t_plan")
+    coverage: list[dict] | None = st.session_state.get("t_coverage")
 
     st.markdown(f"**File:** {filename} &nbsp;·&nbsp; **Sheet:** {detected_sheet}")
 
@@ -320,6 +428,21 @@ def _render_preview():
     c4.metric("AI (GPT)", stats.get("ai_hits", 0))
     c5.metric("Total cells", stats.get("total_cells", 0))
 
+    # Column coverage report
+    if coverage:
+        has_gap = any(not r["_ok"] and r["Source cells"] > 0 for r in coverage)
+        display_cov = [{k: v for k, v in r.items() if k != "_ok"} for r in coverage]
+        cov_df = pd.DataFrame(display_cov)
+
+        if has_gap:
+            st.markdown(
+                '<div class="alert-error">Coverage gap detected — some columns have untranslated cells. '
+                "Export is blocked until all cells are translated.</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("**Column coverage**")
+        st.dataframe(cov_df, use_container_width=True, hide_index=True)
+
     # Admin debug panel
     try:
         user = current_user()
@@ -329,8 +452,8 @@ def _render_preview():
 
     if is_admin:
         scored = st.session_state.get("t_detection_scored") or []
-        if scored:
-            with st.expander("Detection debug", expanded=False):
+        with st.expander("Detection debug", expanded=False):
+            if scored:
                 _, top_score, top_matched = next(
                     (s for s in scored if s[0] == detected_sheet), (None, 0, [])
                 )
@@ -348,6 +471,14 @@ def _render_preview():
                             + (f" ({', '.join(matched)})" if matched else "")
                             + indicator
                         )
+            if plan:
+                st.markdown("**Translation plan:**")
+                for col in plan.translatable_cols:
+                    st.markdown(f"- `{col}`: {plan.cell_counts.get(col, 0)} cells")
+                st.markdown(
+                    f"**Protected columns present:** "
+                    + (", ".join(f"`{c}`" for c in plan.protected_cols) or "—")
+                )
 
     st.markdown("---")
     st.markdown("### Translation preview")
@@ -428,7 +559,6 @@ def _render_preview():
 
 # ── Validate & generate ────────────────────────────────────────────────
 
-
 def _validate_and_generate(current_rows: list):
     filename = st.session_state.get("t_filename") or "file.xlsx"
     file_bytes = st.session_state.get("t_file_bytes")
@@ -436,6 +566,7 @@ def _validate_and_generate(current_rows: list):
     headers = st.session_state.get("t_headers") or []
     data_rows = st.session_state.get("t_data_rows") or []
     sheet_name = st.session_state.get("t_detected_sheet") or "Sheet1"
+    plan: TranslationPlan | None = st.session_state.get("t_plan")
 
     # Detect human corrections
     original_map = {(r["Row"], r["Column"]): r["Dutch translation"] for r in original_preview}
@@ -461,6 +592,17 @@ def _validate_and_generate(current_rows: list):
             src = row.get("German source", "")
             if src in correction_lookup:
                 row["Dutch translation"] = correction_lookup[src]
+
+    # Coverage validation — block export if any column has gaps
+    translatable_cols = plan.translatable_cols if plan else list(
+        {r["Column"] for r in current_rows}
+    )
+    coverage_errors = _validate_coverage(current_rows, data_rows, translatable_cols)
+    if coverage_errors:
+        for err in coverage_errors:
+            st.error(f"Coverage validation failed: {err}")
+        st.error("Export blocked. Fix coverage gaps before downloading.")
+        return
 
     if corrections:
         _save_corrections(corrections, correction_lookup)
@@ -490,10 +632,14 @@ def _validate_and_generate(current_rows: list):
         st.error(f"CSV export failed: {e}")
         return
 
+    # Update coverage stats after edits
+    updated_coverage = _build_coverage(current_rows, data_rows, translatable_cols)
+
     st.session_state["t_preview_rows"] = current_rows
     st.session_state["t_original_preview"] = [dict(r) for r in current_rows]
     st.session_state["t_xl_bytes"] = xl_bytes
     st.session_state["t_csv_bytes"] = csv_bytes
+    st.session_state["t_coverage"] = updated_coverage
     st.session_state["t_version"] = (st.session_state.get("t_version") or 0) + 1
 
     if corrections:
@@ -505,7 +651,6 @@ def _validate_and_generate(current_rows: list):
 
 
 # ── Human correction persistence ──────────────────────────────────────
-
 
 def _save_corrections(corrections: list, correction_lookup: dict):
     from database.database import get_connection
@@ -562,7 +707,6 @@ def _save_corrections(corrections: list, correction_lookup: dict):
 
 
 # ── Reset ──────────────────────────────────────────────────────────────
-
 
 def _reset_state():
     for key in _STATE_KEYS:
