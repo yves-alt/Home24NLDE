@@ -59,6 +59,15 @@ GERMAN_RESIDUE_PATTERNS = [
     (r"\bfoliert\b",                       "gefolieerd"),
     (r"\bpulverbeschichtet\b",             "poedergecoat"),
 
+    # ── German furniture labels (appear in otherMeasurements / deliveryScope) ──
+    (r"\bTisch\b",                         "tafel"),
+    (r"\bStuhl\b",                         "stoel"),
+    (r"\bSessel\b",                        "fauteuil"),
+    (r"\bSchrank\b",                       "kast"),
+    (r"\bRegal\b",                         "rek"),
+    (r"\bBett\b",                          "bed"),
+    (r"\bSofa\b",                          "bank"),
+
     # ── German material names ─────────────────────────────────────────
     (r"\bMetall\b",                        "metaal"),
     (r"\bHolz\b",                          "hout"),
