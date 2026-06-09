@@ -6,8 +6,16 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-TARGET_SHEET = "Tabelle1"
+# Columns used to detect whether a sheet is a Home24 product sheet.
+HOME24_DETECTION_COLUMNS = frozenset({
+    "articleNumber", "name", "variantName", "materialDetail", "colorDetail",
+    "deliveryScope", "qualityDetail", "otherMeasurements",
+    "textileCompositionCover1", "internalDimensionDrawer",
+    "externalDimension", "weightNetto", "weightBrutto",
+    "colorName", "descriptionBullet1", "descriptionBullet2",
+})
 
+# Columns we actually translate (articleNumber is detected but never changed).
 ALLOWED_COLUMNS = [
     "articleNumber",
     "name",
@@ -24,6 +32,7 @@ _STATE_KEYS = [
     "t_step", "t_filename", "t_file_bytes", "t_preview_rows",
     "t_original_preview", "t_xl_bytes", "t_csv_bytes", "t_stats",
     "t_headers", "t_data_rows", "t_version",
+    "t_detected_sheet", "t_detection_scored",
 ]
 
 
@@ -50,6 +59,51 @@ def render():
         _render_preview()
 
 
+# ── Sheet detection ────────────────────────────────────────────────────
+
+
+def _detect_best_sheet(file_bytes: bytes) -> tuple[str | None, list[tuple[str, int, list[str]]]]:
+    """Score every sheet and return the best match.
+
+    Returns (best_sheet_name or None, scored_list).
+    scored_list items: (sheet_name, score, matched_column_names)
+    None means ambiguous — caller must show a selector.
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    scored: list[tuple[str, int, list[str]]] = []
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not first_row:
+            scored.append((sheet_name, 0, []))
+            continue
+        headers = {str(c).strip() for c in first_row if c is not None and str(c).strip()}
+        matched = sorted(headers & HOME24_DETECTION_COLUMNS)
+        scored.append((sheet_name, len(matched), matched))
+
+    wb.close()
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Single sheet → always use it regardless of score
+    if len(scored) == 1:
+        return scored[0][0], scored
+
+    best_score = scored[0][1]
+
+    # No Home24 columns detected in any sheet → need user input
+    if best_score == 0:
+        return None, scored
+
+    # Clear unique winner
+    top = [s for s in scored if s[1] == best_score]
+    if len(top) == 1:
+        return top[0][0], scored
+
+    # Tie → need user input
+    return None, scored
+
+
 # ── Upload ─────────────────────────────────────────────────────────────
 
 
@@ -65,48 +119,81 @@ def _render_upload():
     uploaded = st.file_uploader(
         "Upload German Excel file",
         type=["xlsx", "xls"],
-        help="Must contain a sheet named 'Tabelle1'.",
+        help="The app detects the correct sheet automatically based on column structure.",
     )
 
     if not uploaded:
         st.markdown(
             '<div class="alert-info">Upload a German Excel file to begin. '
-            "The app processes sheet <strong>Tabelle1</strong> automatically "
-            "and translates the expected Home24 columns.</div>",
+            "The app detects the translation sheet automatically "
+            "based on Home24 column structure.</div>",
             unsafe_allow_html=True,
         )
         return
 
+    file_bytes = uploaded.getvalue()
+
+    # Detect best sheet
+    try:
+        detected_sheet, scored = _detect_best_sheet(file_bytes)
+    except Exception as e:
+        st.error(f"Cannot open file: {e}")
+        return
+
     st.success(f"File ready: **{uploaded.name}**")
 
+    if detected_sheet:
+        # Single clear winner — show info and proceed
+        _, score, matched = next((s for s in scored if s[0] == detected_sheet), (None, 0, []))
+        if len(scored) > 1:
+            st.info(
+                f"Sheet detected: **{detected_sheet}** "
+                f"— {score} Home24 column(s) matched: {', '.join(matched)}"
+            )
+        selected_sheet = detected_sheet
+    else:
+        # Ambiguous — show selector with scores
+        sheet_labels = [
+            f"{name} (score: {score})" if score > 0 else name
+            for name, score, _ in scored
+        ]
+        choice_idx = st.selectbox(
+            "Multiple sheets found — select the sheet to translate:",
+            options=range(len(scored)),
+            format_func=lambda i: sheet_labels[i],
+        )
+        selected_sheet = scored[choice_idx][0]
+
     if st.button("Translate", type="primary", use_container_width=True):
-        _run_translation(uploaded.getvalue(), uploaded.name)
+        _run_translation(file_bytes, uploaded.name, selected_sheet, scored)
 
 
 # ── Translation ────────────────────────────────────────────────────────
 
 
-def _run_translation(file_bytes: bytes, filename: str):
+def _run_translation(
+    file_bytes: bytes,
+    filename: str,
+    sheet_name: str,
+    scored: list[tuple[str, int, list[str]]],
+):
     try:
         wb_check = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception as e:
         st.error(f"Cannot open file: {e}")
         return
 
-    if TARGET_SHEET not in wb_check.sheetnames:
-        st.error(
-            f"Sheet '{TARGET_SHEET}' not found in this file.\n"
-            f"Available sheets: {', '.join(wb_check.sheetnames)}"
-        )
+    if sheet_name not in wb_check.sheetnames:
+        st.error(f"Sheet '{sheet_name}' not found. Available: {', '.join(wb_check.sheetnames)}")
         wb_check.close()
         return
 
-    ws = wb_check[TARGET_SHEET]
+    ws = wb_check[sheet_name]
     all_rows = list(ws.iter_rows(values_only=True))
     wb_check.close()
 
     if len(all_rows) < 2:
-        st.error(f"Sheet '{TARGET_SHEET}' has no data rows.")
+        st.error(f"Sheet '{sheet_name}' has no data rows.")
         return
 
     headers = [str(c) if c is not None else "" for c in all_rows[0]]
@@ -114,7 +201,7 @@ def _run_translation(file_bytes: bytes, filename: str):
 
     if not cols_to_translate:
         st.error(
-            f"No translatable columns found in '{TARGET_SHEET}'.\n"
+            f"No translatable columns found in '{sheet_name}'.\n"
             f"Expected: {', '.join(TRANSLATE_COLUMNS)}\n"
             f"Found: {', '.join(h for h in headers if h)}"
         )
@@ -192,7 +279,6 @@ def _run_translation(file_bytes: bytes, filename: str):
     overall_progress.progress(1.0)
     status_text.text("Translation complete.")
 
-    # Store state
     st.session_state["t_file_bytes"] = file_bytes
     st.session_state["t_filename"] = filename
     st.session_state["t_headers"] = headers
@@ -204,8 +290,9 @@ def _run_translation(file_bytes: bytes, filename: str):
     st.session_state["t_csv_bytes"] = None
     st.session_state["t_version"] = 0
     st.session_state["t_step"] = "preview"
+    st.session_state["t_detected_sheet"] = sheet_name
+    st.session_state["t_detection_scored"] = scored
 
-    # Clear any leftover data_editor widget state
     for k in [k for k in st.session_state if k.startswith("preview_editor_")]:
         del st.session_state[k]
 
@@ -216,12 +303,15 @@ def _run_translation(file_bytes: bytes, filename: str):
 
 
 def _render_preview():
+    from auth.session import current_user
+
     filename = st.session_state.get("t_filename") or "file.xlsx"
     stats = st.session_state.get("t_stats") or {}
     preview_rows = st.session_state.get("t_preview_rows") or []
     version = st.session_state.get("t_version") or 0
+    detected_sheet = st.session_state.get("t_detected_sheet") or "—"
 
-    st.markdown(f"**File:** {filename}")
+    st.markdown(f"**File:** {filename} &nbsp;·&nbsp; **Sheet:** {detected_sheet}")
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("TM Exact", stats.get("tm_hits", 0))
@@ -229,6 +319,35 @@ def _render_preview():
     c3.metric("Phrase / Corpus", stats.get("phrase_hits", 0) + stats.get("corpus_hits", 0))
     c4.metric("AI (GPT)", stats.get("ai_hits", 0))
     c5.metric("Total cells", stats.get("total_cells", 0))
+
+    # Admin debug panel
+    try:
+        user = current_user()
+        is_admin = user and user.role == "admin"
+    except Exception:
+        is_admin = False
+
+    if is_admin:
+        scored = st.session_state.get("t_detection_scored") or []
+        if scored:
+            with st.expander("Detection debug", expanded=False):
+                _, top_score, top_matched = next(
+                    (s for s in scored if s[0] == detected_sheet), (None, 0, [])
+                )
+                st.markdown(f"**Detected sheet:** `{detected_sheet}`")
+                st.markdown(f"**Detection score:** {top_score}")
+                st.markdown(
+                    f"**Matched columns:** {', '.join(top_matched) if top_matched else '—'}"
+                )
+                if len(scored) > 1:
+                    st.markdown("**All sheets scored:**")
+                    for name, score, matched in scored:
+                        indicator = " ← selected" if name == detected_sheet else ""
+                        st.markdown(
+                            f"- `{name}` — score {score}"
+                            + (f" ({', '.join(matched)})" if matched else "")
+                            + indicator
+                        )
 
     st.markdown("---")
     st.markdown("### Translation preview")
@@ -272,7 +391,6 @@ def _render_preview():
 
     if validate_clicked:
         current_rows = edited_df.to_dict("records")
-        # Normalise Row to int (data_editor may return float)
         for r in current_rows:
             r["Row"] = int(r["Row"])
         _validate_and_generate(current_rows)
@@ -317,11 +435,12 @@ def _validate_and_generate(current_rows: list):
     original_preview = st.session_state.get("t_original_preview") or []
     headers = st.session_state.get("t_headers") or []
     data_rows = st.session_state.get("t_data_rows") or []
+    sheet_name = st.session_state.get("t_detected_sheet") or "Sheet1"
 
     # Detect human corrections
     original_map = {(r["Row"], r["Column"]): r["Dutch translation"] for r in original_preview}
     corrections = []
-    correction_lookup = {}  # source_text → new_dutch
+    correction_lookup: dict[str, str] = {}
 
     for row in current_rows:
         key = (row["Row"], row["Column"])
@@ -336,14 +455,13 @@ def _validate_and_generate(current_rows: list):
             })
             correction_lookup[row["German source"]] = new_val
 
-    # Propagate corrections to all identical source segments in current file
+    # Propagate corrections to all identical source segments
     if correction_lookup:
         for row in current_rows:
             src = row.get("German source", "")
             if src in correction_lookup:
                 row["Dutch translation"] = correction_lookup[src]
 
-    # Save human corrections to glossary + TM
     if corrections:
         _save_corrections(corrections, correction_lookup)
 
@@ -357,7 +475,9 @@ def _validate_and_generate(current_rows: list):
     # Generate Excel bytes
     try:
         from exporters.xlsx_export import export_workbook_translated_bytes
-        xl_bytes = export_workbook_translated_bytes(file_bytes, translation_map, headers)
+        xl_bytes = export_workbook_translated_bytes(
+            file_bytes, translation_map, headers, sheet_name=sheet_name
+        )
     except Exception as e:
         st.error(f"Excel export failed: {e}")
         return
@@ -370,7 +490,6 @@ def _validate_and_generate(current_rows: list):
         st.error(f"CSV export failed: {e}")
         return
 
-    # Persist updated state
     st.session_state["t_preview_rows"] = current_rows
     st.session_state["t_original_preview"] = [dict(r) for r in current_rows]
     st.session_state["t_xl_bytes"] = xl_bytes
@@ -397,7 +516,6 @@ def _save_corrections(corrections: list, correction_lookup: dict):
         src_lower = c["source"].lower().strip()
         tgt = c["new_target"]
 
-        # Glossary: INSERT OR REPLACE with HUMAN_REVIEW, confidence=1.0
         try:
             with get_connection() as conn:
                 conn.execute(
@@ -409,7 +527,6 @@ def _save_corrections(corrections: list, correction_lookup: dict):
         except Exception:
             pass
 
-        # TM: update existing or insert new
         try:
             normalized_src = src_lower
             normalized_tgt = tgt.lower().strip()
@@ -435,7 +552,6 @@ def _save_corrections(corrections: list, correction_lookup: dict):
         except Exception:
             pass
 
-    # Update in-memory dedup cache so the same session benefits immediately
     try:
         from engines.translation_engine import get_engine
         eng = get_engine()
