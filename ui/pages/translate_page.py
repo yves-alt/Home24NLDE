@@ -307,6 +307,7 @@ def _run_translation(
             context_rows=data_rows,
             filename=filename,
             progress_callback=_cb,
+            column_name=col_name,
         )
 
         for i, (row_idx, source) in enumerate(items):

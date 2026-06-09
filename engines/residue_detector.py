@@ -4,6 +4,12 @@ from dataclasses import dataclass
 
 # Compound phrases must appear BEFORE their component words to get priority
 GERMAN_RESIDUE_PATTERNS = [
+    # ── Dimension label conversions (must come first to avoid partial matches) ──
+    (r"\bB\s*[x×]\s*H\s*[x×]\s*T\b",     "B x H x D"),
+    (r"\bLiegehöhe\b",                     "lighoogte"),
+    (r"\bSitzhöhe\b",                      "zithoogte"),
+    (r"\bArmlehnenh(?:ö)he\b",            "armleuninghoogte"),
+
     # ── Compounds (specific, high-priority) ───────────────────────────
     (r"\bbestehend\s+aus\b",               "bestaande uit"),
     (r"\bohne\s+Dekoration\b",             "zonder decoratie"),
@@ -51,6 +57,13 @@ GERMAN_RESIDUE_PATTERNS = [
     (r"\blackiert\b",                      "gelakt"),
     (r"\bbeschichtet\b",                   "gecoat"),
     (r"\bfoliert\b",                       "gefolieerd"),
+    (r"\bpulverbeschichtet\b",             "poedergecoat"),
+
+    # ── German material names ─────────────────────────────────────────
+    (r"\bMetall\b",                        "metaal"),
+    (r"\bHolz\b",                          "hout"),
+    (r"\bLeder\b",                         "leer"),
+    (r"\bKunststoff\b",                    "kunststof"),
 
     # ── German color names (clearly German, unambiguous) ─────────────
     # Note: IGNORECASE is used, so all-caps variants are caught too
@@ -101,7 +114,8 @@ DUTCH_CAPITALIZATION_FIXES = [
 
 # Words that are unambiguously German and must never appear in Dutch output
 CRITICAL_GERMAN_WORDS = re.compile(
-    r"\b(?:ohne|Schwarz|Wei[ßs]s?|Grau|Hellgrau|Dunkelgrau|Braun|Grün|Gelb|Blau|Rot|Dekor)\b",
+    r"\b(?:ohne|Schwarz|Wei[ßs]s?|Grau|Hellgrau|Dunkelgrau|Braun|Grün|Gelb|Blau|Rot|Dekor"
+    r"|Metall|Holz|Leder|Kunststoff|pulverbeschichtet|lackiert|beschichtet|Eiche|Nussbaum)\b",
     re.IGNORECASE,
 )
 

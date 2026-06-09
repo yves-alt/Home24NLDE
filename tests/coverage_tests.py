@@ -264,9 +264,9 @@ def test_no_metadata_injection():
         print(f"  {'PASS' if ok else 'FAIL'}  '{fragment}' NOT in output")
         passed = passed and ok
 
-    # Commode should be in output (German label translated)
-    ok = "commode" in result.lower() or "kommode" in result.lower()
-    print(f"  {'PASS' if ok else 'FAIL'}  'commode' or 'kommode' present in output")
+    # Kommode should be translated (commode, ladekast, kast are all valid Dutch)
+    ok = any(w in result.lower() for w in ("commode", "kommode", "kast", "ladekast"))
+    print(f"  {'PASS' if ok else 'FAIL'}  Kommode translated (commode/ladekast/kast) in output")
     passed = passed and ok
 
     print()
@@ -456,6 +456,160 @@ def test_pipeline_residue_regression():
     return passed
 
 
+# ── 11. Dimension labels ──────────────────────────────────────────────
+
+def test_dimension_labels():
+    """B x H x T must become B x H x D; Liegehöhe must become lighoogte."""
+    print("=== Dimension label conversions ===")
+
+    from engines.residue_detector import get_residue_detector
+    from engines.qa_engine import normalize_mdf_nl
+    detector = get_residue_detector()
+    passed = True
+
+    # These conversions happen via TM / phrase memory / QA engine
+    cases = [
+        ("B x H x T: 80 x 75 x 40 cm",    "B x H x D",     "BHT → BHD"),
+        ("Liegehöhe: 45 cm",               "lighoogte",      "Liegehöhe → lighoogte"),
+    ]
+    run_migrations()
+    from engines.translation_engine import get_engine
+    engine = get_engine()
+
+    for source, expected_fragment, desc in cases:
+        items = [(0, source)]
+        try:
+            batch = engine.translate_batch(items, context_rows=[], filename="test.xlsx")
+            result = batch.results[0].target if batch.results else ""
+        except Exception as exc:
+            result = f"ERROR: {exc}"
+
+        ok = expected_fragment.lower() in result.lower()
+        print(f"  {'PASS' if ok else 'FAIL'}  {desc}: '{source}' → '{result}'")
+        passed = passed and ok
+
+    print()
+    return passed
+
+
+# ── 12. Decor look patterns ───────────────────────────────────────────
+
+def test_decor_look_patterns():
+    """Eiche Sägerau Dekor → grof gezaagde eikenlook; Nussbaum Dekor → notenlook."""
+    print("=== Decor look patterns ===")
+    run_migrations()
+
+    from engines.translation_engine import get_engine
+    engine = get_engine()
+    passed = True
+
+    cases = [
+        ("Eiche Sägerau Dekor",  "eikenlook",    "Eiche Sägerau → eikenlook"),
+        ("Nussbaum Dekor",       "notenlook",     "Nussbaum → notenlook"),
+    ]
+
+    for source, expected_fragment, desc in cases:
+        items = [(0, source)]
+        try:
+            batch = engine.translate_batch(items, context_rows=[], filename="test.xlsx")
+            result = batch.results[0].target if batch.results else ""
+        except Exception as exc:
+            result = f"ERROR: {exc}"
+
+        ok = expected_fragment.lower() in result.lower()
+        print(f"  {'PASS' if ok else 'FAIL'}  {desc}: '{source}' → '{result}'")
+        passed = passed and ok
+
+    # Also confirm Dekor is not left in output
+    test_with_dekor = "Eiche Sägerau Dekor"
+    items = [(0, test_with_dekor)]
+    try:
+        batch = engine.translate_batch(items, context_rows=[], filename="test.xlsx")
+        result = batch.results[0].target if batch.results else ""
+    except Exception:
+        result = ""
+
+    from engines.residue_detector import get_residue_detector
+    residue = get_residue_detector().has_critical_residue(result)
+    ok = "Dekor" not in residue
+    print(f"  {'PASS' if ok else 'FAIL'}  'Dekor' not in critical residue after pipeline  (residue: {residue})")
+    passed = passed and ok
+
+    print()
+    return passed
+
+
+# ── 13. Product name max-40 characters ───────────────────────────────
+
+def test_product_name_max_40():
+    """Translated product names (column 'name') must be ≤ 40 characters and complete."""
+    print("=== Product name max 40 chars ===")
+    run_migrations()
+
+    from engines.translation_engine import get_engine
+    engine = get_engine()
+    passed = True
+
+    long_names = [
+        "Pantryküche Levin mit Kühlschrank und Backofen",
+        "Ecksofa Clarissa mit Schlaffunktion und Stauraum",
+        "Bücherregal Maximilian aus Massivholz mit Metallgestell",
+    ]
+
+    for source in long_names:
+        items = [(0, source)]
+        try:
+            batch = engine.translate_batch(
+                items, context_rows=[], filename="test.xlsx", column_name="name"
+            )
+            result = batch.results[0].target if batch.results else ""
+        except Exception as exc:
+            result = f"ERROR: {exc}"
+
+        ok_len = len(result) <= 40
+        ok_complete = not result.endswith(("met", "van", "voor", "uit"))
+        ok = ok_len and ok_complete
+        print(f"  {'PASS' if ok else 'FAIL'}  '{source}' ({len(source)} chars)")
+        print(f"         → '{result}' ({len(result)} chars)  len≤40={ok_len}  complete={ok_complete}")
+        passed = passed and ok
+
+    print()
+    return passed
+
+
+# ── 14. New material residue patterns ────────────────────────────────
+
+def test_material_residue_patterns():
+    """Metall, Holz, Leder, Kunststoff, pulverbeschichtet must be auto-converted."""
+    print("=== Material residue patterns ===")
+
+    from engines.residue_detector import get_residue_detector, GERMAN_RESIDUE_PATTERNS
+    detector = get_residue_detector()
+    passed = True
+
+    cases = [
+        ("Metall, pulverbeschichtet",    "metaal, poedergecoat",     "Metall + pulverbeschichtet"),
+        ("Holz, lackiert",               "hout, gelakt",              "Holz + lackiert"),
+        ("Leder",                        "leer",                      "Leder → leer"),
+        ("Kunststoff",                   "kunststof",                 "Kunststoff → kunststof"),
+    ]
+
+    for inp, expected, desc in cases:
+        result = detector.detect_and_clean(inp, auto_fix=True)
+        ok = result.text.lower() == expected.lower()
+        print(f"  {'PASS' if ok else 'FAIL'}  {desc}: {inp!r} → {result.text!r}  (expected {expected!r})")
+        passed = passed and ok
+
+    # Confirm patterns present in GERMAN_RESIDUE_PATTERNS
+    for word in ("Metall", "Holz", "Leder", "Kunststoff", "pulverbeschichtet"):
+        covered = any(word.lower() in p.lower() for p, _ in GERMAN_RESIDUE_PATTERNS)
+        print(f"  {'PASS' if covered else 'FAIL'}  '{word}' present in GERMAN_RESIDUE_PATTERNS")
+        passed = passed and covered
+
+    print()
+    return passed
+
+
 # ── Runner ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -470,6 +624,10 @@ if __name__ == "__main__":
         test_mdf_normalization(),
         test_tm_import_upsert(),
         test_pipeline_residue_regression(),
+        test_dimension_labels(),
+        test_decor_look_patterns(),
+        test_product_name_max_40(),
+        test_material_residue_patterns(),
     ]
 
     total = len(results)
