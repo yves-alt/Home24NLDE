@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -122,7 +123,22 @@ Rules:
 - Colors lowercase unless sentence-initial
 - Never leave German words in output
 
-Output: only the Dutch translation, no explanation, no quotes."""
+Output format (CRITICAL):
+- Return ONLY the Dutch translation of the source text — nothing else
+- Do NOT add labels, metadata, categories, context, explanations, or annotations
+- Forbidden output prefixes (never use these): Categorie:, Category:, Product type:, Context:, Note:, Explanation:
+- If product category context is provided, use it for understanding only — never mention it in the output"""
+
+
+# Strips any AI-injected metadata labels from output — safety net applied before the result leaves _ai_translate
+_METADATA_LEAK_RE = re.compile(
+    r"(?mi)^(?:Categorie|Category|Product\s*categor(?:y|ie)|Product\s*type|Product\s*soort"
+    r"|Context|Note|Explanation|Toelichting)\s*:.*$\n?"
+)
+
+
+def _strip_metadata_leaks(text: str) -> str:
+    return _METADATA_LEAK_RE.sub("", text).strip()
 
 
 def _load_api_key() -> str:
@@ -390,6 +406,9 @@ class TranslationEngine:
             if did_generate and source_type == TranslationSource.GPT:
                 translation = generated
 
+        # Metadata leak safety net — strip any injected label lines from any source
+        translation = _strip_metadata_leaks(translation)
+
         # Naturalness rewrite
         rewritten, _ = self._rewriter.rewrite(translation)
         was_rewritten = rewritten != translation
@@ -451,12 +470,16 @@ class TranslationEngine:
             "storage": "opbergruimte", "textile": "textiel", "dining": "eetkamer",
             "decoration": "decoratie", "office": "kantoor",
         }
-        ctx_hint = ""
         cat_nl = cat_nl_map.get(product_type, "")
-        if not cat_nl and ctx_signal and ctx_signal.category != "general":
+        if not cat_nl and ctx_signal and getattr(ctx_signal, "category", "general") != "general":
             cat_nl = cat_nl_map.get(ctx_signal.category, "")
+
+        # Category hint goes into the system message only — never into user content
+        system_content = GPT_SYSTEM_PROMPT
         if cat_nl:
-            ctx_hint = f" [Categorie: {cat_nl}]"
+            system_content += (
+                f"\n\nInternal context (do NOT reproduce in output): product category = {cat_nl}"
+            )
 
         try:
             client = self._get_client()
@@ -465,11 +488,12 @@ class TranslationEngine:
                 max_tokens=256,
                 temperature=0.1,
                 messages=[
-                    {"role": "system", "content": GPT_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Translate to Dutch:{ctx_hint}\n{source}"},
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": f"Translate to Dutch:\n{source}"},
                 ],
             )
             translation = resp.choices[0].message.content.strip()
+            translation = _strip_metadata_leaks(translation)
             tokens = resp.usage.total_tokens
             return translation, tokens
         except Exception:

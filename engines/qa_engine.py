@@ -3,6 +3,12 @@ from dataclasses import dataclass, field
 from database.database import get_connection
 
 
+_METADATA_LEAK_RE = re.compile(
+    r"(?mi)^(?:Categorie|Category|Product\s*categor(?:y|ie)|Product\s*type|Product\s*soort"
+    r"|Context|Note|Explanation|Toelichting)\s*:.*$\n?"
+)
+
+
 FORBIDDEN_PATTERNS: dict[str, str] = {
     r"\bKeukeninsel\b": "kookeiland",
     r"\bDouchematt(?!e)\b": "douchemat",
@@ -79,6 +85,10 @@ class DutchQAEngine:
         result = translation
         issues: list[QAIssue] = []
 
+        # Must run first — strips injected metadata before other checks see it
+        result, new_issues = self._check_metadata_leaks(result)
+        issues.extend(new_issues)
+
         result, new_issues = self._check_forbidden(result)
         issues.extend(new_issues)
 
@@ -93,6 +103,13 @@ class DutchQAEngine:
 
         was_modified = result != translation
         return QAResult(translation, result, issues, was_modified)
+
+    def _check_metadata_leaks(self, text: str) -> tuple[str, list[QAIssue]]:
+        issues = []
+        for m in _METADATA_LEAK_RE.finditer(text):
+            issues.append(QAIssue("metadata_leak", m.group(0).strip(), "", m.start(), True))
+        cleaned = _METADATA_LEAK_RE.sub("", text).strip()
+        return cleaned, issues
 
     def _check_forbidden(self, text: str) -> tuple[str, list[QAIssue]]:
         issues = []

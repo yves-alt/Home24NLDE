@@ -207,6 +207,72 @@ def test_canonical_translations():
     return passed
 
 
+# ── 6. No metadata injection ──────────────────────────────────────────
+
+def test_no_metadata_injection():
+    """Category metadata (Categorie:, decoratie, etc.) must never appear in translated output."""
+    print("=== No metadata injection ===")
+
+    from engines.translation_engine import _strip_metadata_leaks, _METADATA_LEAK_RE
+    from engines.qa_engine import get_qa_engine
+
+    passed = True
+
+    # Direct sanitizer tests
+    leak_cases = [
+        ("Categorie: decoratie\nPaneel: 90 x 90 x 27 cm", "Paneel: 90 x 90 x 27 cm"),
+        ("Category: decoration\nSome product text",       "Some product text"),
+        ("Product type: meubels\nText here",               "Text here"),
+        ("Note: internal\nActual content",                 "Actual content"),
+        ("Clean output without any labels",                "Clean output without any labels"),
+    ]
+    for inp, expected in leak_cases:
+        got = _strip_metadata_leaks(inp)
+        ok = got == expected
+        print(f"  {'PASS' if ok else 'FAIL'}  sanitizer: {inp[:40]!r} → {got!r}")
+        passed = passed and ok
+
+    # QA engine strips metadata_leak issues
+    qa = get_qa_engine()
+    qa_input = "Categorie: decoratie\nPaneel: 90 x 90 x 27 cm"
+    qa_result = qa.validate(qa_input)
+    ok = "Categorie" not in qa_result.corrected and any(
+        i.issue_type == "metadata_leak" for i in qa_result.issues
+    )
+    print(f"  {'PASS' if ok else 'FAIL'}  QA engine strips Categorie: and flags metadata_leak issue")
+    print(f"    corrected: {qa_result.corrected!r}")
+    passed = passed and ok
+
+    # Regression: measurement cell must not gain a Categorie: line
+    source = "<br>Paneel: 90 x 90 x 27 cm<br>Bank: 90 x 45 x 40 cm<br>Spiegel: 96 x 60 x 4 cm<br>Kommode: 100 x 90 x 40 cm"
+    forbidden_fragments = ["Categorie", "Category", "decoratie"]
+
+    run_migrations()
+    from engines.translation_engine import get_engine
+    engine = get_engine()
+    items = [(0, source)]
+    try:
+        batch = engine.translate_batch(items, context_rows=[], filename="test.xlsx")
+        result = batch.results[0].target if batch.results else ""
+    except Exception as exc:
+        result = f"ERROR: {exc}"
+
+    print(f"  Measurement cell result: {result!r}")
+
+    for fragment in forbidden_fragments:
+        ok = fragment not in result
+        print(f"  {'PASS' if ok else 'FAIL'}  '{fragment}' NOT in output")
+        passed = passed and ok
+
+    # Commode should be in output (German label translated)
+    ok = "commode" in result.lower() or "kommode" in result.lower()
+    print(f"  {'PASS' if ok else 'FAIL'}  'commode' or 'kommode' present in output")
+    passed = passed and ok
+
+    print()
+    return passed
+
+
 # ── Runner ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -216,6 +282,7 @@ if __name__ == "__main__":
         test_resolve_columns(),
         test_coverage_validation(),
         test_canonical_translations(),
+        test_no_metadata_injection(),
     ]
 
     total = len(results)
