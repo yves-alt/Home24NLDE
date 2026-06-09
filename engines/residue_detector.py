@@ -2,37 +2,82 @@ import re
 from dataclasses import dataclass
 
 
+# Compound phrases must appear BEFORE their component words to get priority
 GERMAN_RESIDUE_PATTERNS = [
-    (r"\bund\b", "en"),
-    (r"\boder\b", "of"),
-    (r"\bmit\b(?!\s+\w+look)", "met"),
-    (r"\bfür\b", "voor"),
-    (r"\bvon\b", "van"),
-    (r"\baus\b", "van"),
-    (r"\bauf\b", "op"),
-    (r"\bein(?:e|em|en|er|es)?\b", "een"),
-    (r"\bist\b", "is"),
-    (r"\bnicht\b", "niet"),
-    (r"\bsehr\b", "zeer"),
-    (r"\bgut\b", "goed"),
-    (r"\bgroß\b", "groot"),
-    (r"\bklein\b", "klein"),
-    (r"\bneu\b", "nieuw"),
-    (r"\balt\b", "oud"),
-    (r"\bhoch\b", "hoog"),
-    (r"\bniedrig\b", "laag"),
-    (r"\bbreit\b", "breed"),
-    (r"\btief\b", "diep"),
-    (r"\bpraktisch\b", "praktisch"),
-    (r"\bmodern\b", "modern"),
-    (r"\bstilvoll\b", "stijlvol"),
-    (r"\belegan[tz]\b", "elegant"),
-    (r"\brobust\b", "robuust"),
-    (r"\bkomfortabel\b", "comfortabel"),
-    (r"\binkl(?:usive)?\b", "incl."),
-    (r"\bexkl(?:usive)?\b", "excl."),
-    (r"\bmontiert\b", "gemonteerd"),
-    (r"\bgeliefert\b", "geleverd"),
+    # ── Compounds (specific, high-priority) ───────────────────────────
+    (r"\bbestehend\s+aus\b",               "bestaande uit"),
+    (r"\bohne\s+Dekoration\b",             "zonder decoratie"),
+    (r"\bmit\s+Dekoration\b",              "met decoratie"),
+    (r"\binkl(?:usive)?\s+Montage\b",      "incl. montage"),
+    (r"\bexkl(?:usive)?\s+Montage\b",      "excl. montage"),
+
+    # ── German function words ─────────────────────────────────────────
+    (r"\bohne\b",                          "zonder"),
+    (r"\bund\b",                           "en"),
+    (r"\boder\b",                          "of"),
+    (r"\bmit\b(?!\s+\w+look)",             "met"),
+    (r"\bfür\b",                           "voor"),
+    (r"\bvon\b",                           "van"),
+    (r"\baus\b",                           "van"),
+    (r"\bauf\b",                           "op"),
+    (r"\bnach\b",                          "naar"),
+    (r"\bzu\b(?!\s+\w+look)",              "naar"),
+    (r"\bein(?:e|em|en|er|es)?\b",         "een"),
+    (r"\bist\b",                           "is"),
+    (r"\bnicht\b",                         "niet"),
+    (r"\bkein(?:e|em|en|er|es)?\b",        "geen"),
+    (r"\bsehr\b",                          "zeer"),
+    (r"\bgut\b",                           "goed"),
+    (r"\binkl(?:usive)?\b",                "incl."),
+    (r"\bexkl(?:usive)?\b",                "excl."),
+
+    # ── German adjectives ─────────────────────────────────────────────
+    (r"\bgroß\b",                          "groot"),
+    (r"\bklein\b",                         "klein"),
+    (r"\bneu\b",                           "nieuw"),
+    (r"\balt\b",                           "oud"),
+    (r"\bhoch\b",                          "hoog"),
+    (r"\bniedrig\b",                       "laag"),
+    (r"\bbreit\b",                         "breed"),
+    (r"\btief\b",                          "diep"),
+    (r"\bpraktisch\b",                     "praktisch"),
+    (r"\bmodern\b",                        "modern"),
+    (r"\bstilvoll\b",                      "stijlvol"),
+    (r"\belegan[tz]\b",                    "elegant"),
+    (r"\brobust\b",                        "robuust"),
+    (r"\bkomfortabel\b",                   "comfortabel"),
+    (r"\bmontiert\b",                      "gemonteerd"),
+    (r"\bgeliefert\b",                     "geleverd"),
+    (r"\blackiert\b",                      "gelakt"),
+    (r"\bbeschichtet\b",                   "gecoat"),
+    (r"\bfoliert\b",                       "gefolieerd"),
+
+    # ── German color names (clearly German, unambiguous) ─────────────
+    # Note: IGNORECASE is used, so all-caps variants are caught too
+    (r"\bSchwarz\b",                       "zwart"),
+    (r"\bWei[ß|ss]\b",                     "wit"),       # Weiß or Weiss
+    (r"\bHellgrau\b",                      "lichtgrijs"),
+    (r"\bDunkelgrau\b",                    "donkergrijs"),
+    (r"\bGrau\b",                          "grijs"),
+    (r"\bBraun\b",                         "bruin"),
+    (r"\bGrün\b",                          "groen"),
+    (r"\bOliv(?:grün)?\b",                 "olijfgroen"),
+    (r"\bGelb\b",                          "geel"),
+    (r"\bBlau\b",                          "blauw"),
+    (r"\bHellblau\b",                      "lichtblauw"),
+    (r"\bDunkelblau\b",                    "donkerblauw"),
+    (r"\bRot\b",                           "rood"),
+    (r"\bOrange\b",                        "oranje"),
+    (r"\bRosa\b",                          "roze"),
+    (r"\bLila\b",                          "lila"),
+    (r"\bViolett\b",                       "paars"),
+    (r"\bTürki(?:s|sch)\b",               "turquoise"),
+    (r"\bSilber\b",                        "zilver"),
+    (r"\bGold\b",                          "goud"),
+    (r"\bSand(?:farben)?\b",               "zand"),
+    (r"\bBei(?:ge)?\b",                    "beige"),
+    (r"\bAnthrazit\b",                     "antraciet"),
+    (r"\bSchwarzbraun\b",                  "zwartbruin"),
 ]
 
 HYBRID_PATTERNS = [
@@ -53,6 +98,12 @@ DUTCH_CAPITALIZATION_FIXES = [
     (r"\bIjzer\b", "IJzer"),
     (r"\bIjsland\b", "IJsland"),
 ]
+
+# Words that are unambiguously German and must never appear in Dutch output
+CRITICAL_GERMAN_WORDS = re.compile(
+    r"\b(?:ohne|Schwarz|Wei[ßs]s?|Grau|Hellgrau|Dunkelgrau|Braun|Grün|Gelb|Blau|Rot|Dekor)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -94,6 +145,11 @@ class GermanResidueDetector:
     def has_residue(self, text: str) -> bool:
         r = self.detect_and_clean(text, auto_fix=False)
         return bool(r.german_residues or r.hybrids)
+
+    def has_critical_residue(self, text: str) -> list[str]:
+        """Return list of critical German words still present after auto-fix."""
+        cleaned = self.detect_and_clean(text, auto_fix=True).text
+        return CRITICAL_GERMAN_WORDS.findall(cleaned)
 
 
 _instance: GermanResidueDetector | None = None

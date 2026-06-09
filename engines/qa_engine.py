@@ -8,6 +8,8 @@ _METADATA_LEAK_RE = re.compile(
     r"|Context|Note|Explanation|Toelichting)\s*:.*$\n?"
 )
 
+# Strips parenthetical expansion after MDF — both German and Dutch explanations
+_MDF_PAREN_RE = re.compile(r"\bMDF\s*\([^)]*\)", re.IGNORECASE)
 
 FORBIDDEN_PATTERNS: dict[str, str] = {
     r"\bKeukeninsel\b": "kookeiland",
@@ -17,6 +19,7 @@ FORBIDDEN_PATTERNS: dict[str, str] = {
     r"\bNotelaar\s+Dekor\b": "notenlook",
     r"\bZaagruw\s*Decor\b": "grof gezaagde look",
     r"\bDecor\b(?!\s*\w)": "look",
+    r"\bDekor\b(?!\s*\w)": "look",
     r"\bIjzer\b(?!\s*hout)": "IJzer",
     r"\bIJs\b(?!\s*(?:koud|thee|blok|kast|water))": "ijs",
     r"\bBadewanne\b": "bad",
@@ -25,10 +28,15 @@ FORBIDDEN_PATTERNS: dict[str, str] = {
 }
 
 GERMAN_WORDS_IN_NL = [
-    r"\bund\b", r"\boder\b", r"\bmit\b", r"\bfür\b", r"\bvon\b", r"\bein(?:e|em|en|er|es)?\b",
+    r"\bund\b", r"\boder\b", r"\bmit\b", r"\bfür\b", r"\bvon\b",
+    r"\bein(?:e|em|en|er|es)?\b",
     r"\bist\b", r"\bgroß\b", r"\bneu\b", r"\bhoch\b", r"\bbreit\b", r"\btief\b",
     r"\binkl\.\s*MwSt\b", r"\bzzgl\b", r"\bzzgl\.\b",
     r"\bMontage\b", r"\bVerpackung\b", r"\bLieferung\b",
+    r"\bohne\b",
+    r"\bSchwarz\b", r"\bWei[ßs]s?\b", r"\bGrau\b", r"\bBraun\b",
+    r"\bGrün\b", r"\bGelb\b", r"\bBlau\b", r"\bRot\b",
+    r"\bDekor\b",
 ]
 
 PLURAL_CORRECTIONS: dict[str, str] = {
@@ -49,6 +57,13 @@ AUTO_CORRECT_MAP: dict[str, str] = {
     **{p: r for p, r in FORBIDDEN_PATTERNS.items()},
     **{p: r for p, r in PLURAL_CORRECTIONS.items()},
 }
+
+
+def normalize_mdf_nl(text: str) -> str:
+    """Remove parenthetical expansion after MDF and ensure uppercase."""
+    text = _MDF_PAREN_RE.sub("MDF", text)
+    text = re.sub(r"\bmdf\b", "MDF", text, flags=re.IGNORECASE)
+    return text
 
 
 @dataclass
@@ -73,7 +88,7 @@ class QAResult:
 
     @property
     def has_critical(self) -> bool:
-        return any(i.issue_type in ("german_residue", "forbidden_pattern", "hybrid") for i in self.issues)
+        return any(i.issue_type in ("german_residue", "forbidden_pattern", "hybrid", "metadata_leak") for i in self.issues)
 
 
 class DutchQAEngine:
@@ -87,6 +102,9 @@ class DutchQAEngine:
 
         # Must run first — strips injected metadata before other checks see it
         result, new_issues = self._check_metadata_leaks(result)
+        issues.extend(new_issues)
+
+        result, new_issues = self._check_mdf(result)
         issues.extend(new_issues)
 
         result, new_issues = self._check_forbidden(result)
@@ -109,6 +127,13 @@ class DutchQAEngine:
         for m in _METADATA_LEAK_RE.finditer(text):
             issues.append(QAIssue("metadata_leak", m.group(0).strip(), "", m.start(), True))
         cleaned = _METADATA_LEAK_RE.sub("", text).strip()
+        return cleaned, issues
+
+    def _check_mdf(self, text: str) -> tuple[str, list[QAIssue]]:
+        issues = []
+        cleaned = normalize_mdf_nl(text)
+        if cleaned != text:
+            issues.append(QAIssue("mdf_normalization", text, cleaned, 0, True))
         return cleaned, issues
 
     def _check_forbidden(self, text: str) -> tuple[str, list[QAIssue]]:
@@ -159,6 +184,28 @@ class DutchQAEngine:
                     "INSERT INTO qa_log (filename, row_num, issue_type, original, corrected, auto_fixed) VALUES (?,?,?,?,?,?)",
                     (filename, row_num, issue.issue_type, issue.original, issue.suggestion, 1 if issue.auto_fixable else 0),
                 )
+
+
+def run_final_quality_gate(dutch: str, source: str = "") -> list[str]:
+    """Run all QA checks on a final Dutch translation. Returns list of issue descriptions."""
+    if not dutch:
+        return []
+    from engines.residue_detector import get_residue_detector
+    detector = get_residue_detector()
+    residue = detector.detect_and_clean(dutch, auto_fix=False)
+    issues = []
+    if residue.german_residues:
+        for w in residue.german_residues:
+            issues.append(f"German residue '{w}'")
+    if residue.hybrids:
+        for w in residue.hybrids:
+            issues.append(f"Hybrid form '{w}'")
+    qa = get_qa_engine()
+    result = qa.validate(dutch, source)
+    for issue in result.issues:
+        if issue.issue_type in ("german_residue", "forbidden_pattern", "metadata_leak", "mdf_normalization"):
+            issues.append(f"{issue.issue_type}: '{issue.original}'")
+    return issues
 
 
 _instance: DutchQAEngine | None = None

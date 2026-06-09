@@ -273,6 +273,189 @@ def test_no_metadata_injection():
     return passed
 
 
+# ── 7. German residue detector ────────────────────────────────────────
+
+def test_german_residue_detector():
+    """Residue detector must auto-fix 'ohne', colors, and compound phrases."""
+    print("=== German residue detector ===")
+
+    from engines.residue_detector import get_residue_detector
+    detector = get_residue_detector()
+    passed = True
+
+    cases = [
+        # (input, expected_output, description)
+        ("ohne Dekoration",                     "zonder decoratie",                 "ohne Dekoration compound"),
+        ("set bestehend aus 2 stoelen, ohne decoratie",
+                                                "set bestaande uit 2 stoelen, zonder decoratie",
+                                                                                    "bestehend aus + ohne"),
+        ("Schwarz / Grau",                      "zwart / grijs",                    "colors Schwarz/Grau"),
+        ("Weiß / Beige",                        "wit / beige",                      "Weiß → wit"),
+        ("Braun, modern",                       "bruin, modern",                    "Braun → bruin"),
+        ("lackiert",                            "gelakt",                           "lackiert → gelakt"),
+        ("beschichtet",                         "gecoat",                           "beschichtet → gecoat"),
+        ("foliert",                             "gefolieerd",                       "foliert → gefolieerd"),
+        ("zonder decoratie",                    "zonder decoratie",                 "already Dutch — no change"),
+    ]
+
+    for inp, expected, desc in cases:
+        result = detector.detect_and_clean(inp, auto_fix=True)
+        ok = result.text.lower() == expected.lower()
+        print(f"  {'PASS' if ok else 'FAIL'}  {desc}: {inp!r} → {result.text!r}  (expected {expected!r})")
+        passed = passed and ok
+
+    # ohne must be in the patterns list
+    from engines.residue_detector import GERMAN_RESIDUE_PATTERNS
+    ohne_covered = any("ohne" in p for p, _ in GERMAN_RESIDUE_PATTERNS)
+    print(f"  {'PASS' if ohne_covered else 'FAIL'}  'ohne' present in GERMAN_RESIDUE_PATTERNS")
+    passed = passed and ohne_covered
+
+    print()
+    return passed
+
+
+# ── 8. MDF normalization ──────────────────────────────────────────────
+
+def test_mdf_normalization():
+    """MDF must always be uppercase and parenthetical expansions must be removed."""
+    print("=== MDF normalization ===")
+
+    from engines.qa_engine import normalize_mdf_nl
+    passed = True
+
+    cases = [
+        ("MDF (mitteldichte Holzfaserplatte), lackiert",  "MDF, gelakt"),
+        ("MDF (Medium Density Fibreboard), gelakt",       "MDF, gelakt"),
+        ("MDF (middeldichte vezelplaat), gelakt",          "MDF, gelakt"),
+        ("mdf, lackiert",                                  "MDF, gelakt"),
+        ("MDF, gelakt",                                    "MDF, gelakt"),   # already clean
+    ]
+
+    for inp, expected in cases:
+        # normalize_mdf_nl strips parens + uppercases; residue detector translates lackiert
+        from engines.residue_detector import get_residue_detector
+        detector = get_residue_detector()
+        step1 = normalize_mdf_nl(inp)
+        step2 = detector.detect_and_clean(step1, auto_fix=True).text
+        ok = step2.lower() == expected.lower()
+        print(f"  {'PASS' if ok else 'FAIL'}  {inp!r}")
+        print(f"           → {step2!r}  (expected {expected!r})")
+        passed = passed and ok
+
+    print()
+    return passed
+
+
+# ── 9. TM importer UPSERT (no DELETE) ────────────────────────────────
+
+def test_tm_import_upsert():
+    """TM import must use UPSERT, never DELETE existing entries."""
+    print("=== TM importer UPSERT ===")
+    run_migrations()
+    passed = True
+
+    from database.database import get_connection
+    from importers.tm_importer import import_tm_from_bytes
+    import io, csv
+
+    # Count existing entries before import
+    with get_connection() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM translation_memory").fetchone()[0]
+
+    # Build a minimal CSV TM
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["source", "target", "frequency"])
+    writer.writeheader()
+    writer.writerow({"source": "__test_ohne_import__", "target": "__zonder_import__", "frequency": "1"})
+    writer.writerow({"source": "",  "target": "skip",  "frequency": "0"})  # invalid row
+    csv_bytes = buf.getvalue().encode("utf-8")
+
+    stats = import_tm_from_bytes(csv_bytes, "test_import.csv")
+    print(f"  stats: {stats}")
+
+    # Entries must not have decreased
+    with get_connection() as conn:
+        after = conn.execute("SELECT COUNT(*) FROM translation_memory").fetchone()[0]
+
+    ok = after >= before
+    print(f"  {'PASS' if ok else 'FAIL'}  TM count did not decrease: {before} → {after}")
+    passed = passed and ok
+
+    ok = stats["inserted"] >= 1
+    print(f"  {'PASS' if ok else 'FAIL'}  At least 1 row inserted  (got {stats['inserted']})")
+    passed = passed and ok
+
+    ok = stats["invalid"] == 1
+    print(f"  {'PASS' if ok else 'FAIL'}  1 invalid row detected  (got {stats['invalid']})")
+    passed = passed and ok
+
+    # Import same file again — should update, not insert duplicate
+    stats2 = import_tm_from_bytes(csv_bytes, "test_import.csv")
+    ok = stats2["updated"] >= 1 and stats2["inserted"] == 0
+    print(f"  {'PASS' if ok else 'FAIL'}  Duplicate import → updated={stats2['updated']}, inserted={stats2['inserted']}")
+    passed = passed and ok
+
+    # TM matcher must find the new entry immediately (cache reloaded)
+    from engines.tm_matcher import get_matcher
+    matcher = get_matcher()
+    match = matcher.match("__test_ohne_import__")
+    ok = match is not None and match.target == "__zonder_import__"
+    print(f"  {'PASS' if ok else 'FAIL'}  Imported entry found in TM matcher immediately")
+    passed = passed and ok
+
+    # Clean up test entry
+    with get_connection() as conn:
+        conn.execute("DELETE FROM translation_memory WHERE source_segment='__test_ohne_import__'")
+    matcher.reload()
+
+    print()
+    return passed
+
+
+# ── 10. Full pipeline residue regression ─────────────────────────────
+
+def test_pipeline_residue_regression():
+    """Full pipeline must produce clean Dutch with no German residue."""
+    print("=== Full pipeline residue regression ===")
+    run_migrations()
+
+    from engines.translation_engine import get_engine
+    from engines.residue_detector import get_residue_detector
+    engine = get_engine()
+    detector = get_residue_detector()
+
+    cases = [
+        ("ohne Dekoration",                          "zonder",      "ohne → zonder"),
+        ("Schwarz / Grau",                           "zwart",       "Schwarz → zwart"),
+        ("Metall, pulverbeschichtet",                "gepoedercoat","Metall pulverbeschichtet"),
+        ("Set bestehend aus 2 Stühlen, ohne Dekoration",
+                                                     "bestaande",   "bestehend aus compound"),
+    ]
+
+    passed = True
+    for source, expected_fragment, desc in cases:
+        items = [(0, source)]
+        try:
+            batch = engine.translate_batch(items, context_rows=[], filename="test.xlsx")
+            result = batch.results[0].target if batch.results else ""
+        except Exception as exc:
+            result = f"ERROR: {exc}"
+
+        ok = expected_fragment.lower() in result.lower()
+        print(f"  {'PASS' if ok else 'FAIL'}  {desc}: '{source}' → '{result}'")
+        passed = passed and ok
+
+        # Extra: no critical German residue after full pipeline
+        remaining = detector.has_critical_residue(result)
+        ok2 = len(remaining) == 0
+        if not ok2:
+            print(f"  FAIL  Critical residue remaining: {remaining}")
+        passed = passed and ok2
+
+    print()
+    return passed
+
+
 # ── Runner ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -283,6 +466,10 @@ if __name__ == "__main__":
         test_coverage_validation(),
         test_canonical_translations(),
         test_no_metadata_injection(),
+        test_german_residue_detector(),
+        test_mdf_normalization(),
+        test_tm_import_upsert(),
+        test_pipeline_residue_regression(),
     ]
 
     total = len(results)

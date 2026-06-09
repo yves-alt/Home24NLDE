@@ -557,6 +557,53 @@ def _render_preview():
                 )
 
 
+# ── Final quality gate ─────────────────────────────────────────────────
+
+def _run_quality_gate(rows: list) -> list:
+    """Auto-correct residue and MDF issues; show warnings for anything unfixable."""
+    from engines.residue_detector import get_residue_detector
+    from engines.qa_engine import normalize_mdf_nl
+
+    detector = get_residue_detector()
+    corrections_made = 0
+    gate_warnings = []
+
+    for row in rows:
+        dutch = (row.get("Dutch translation") or "").strip()
+        if not dutch:
+            continue
+
+        # MDF normalization
+        fixed = normalize_mdf_nl(dutch)
+
+        # German residue auto-fix
+        residue = detector.detect_and_clean(fixed, auto_fix=True)
+        fixed = residue.text
+
+        if fixed != dutch:
+            row["Dutch translation"] = fixed
+            corrections_made += 1
+
+        # Anything still remaining after auto-fix?
+        remaining = detector.has_critical_residue(fixed)
+        if remaining:
+            gate_warnings.append(
+                f"Row {row['Row']}, '{row['Column']}': critical German residue {remaining} — please correct manually"
+            )
+
+    if corrections_made:
+        st.info(f"Quality gate auto-corrected {corrections_made} cell(s) (German residue / MDF normalization).")
+
+    if gate_warnings:
+        st.warning(f"{len(gate_warnings)} cell(s) have German residue that could not be auto-corrected:")
+        for w in gate_warnings[:10]:
+            st.error(w)
+        if len(gate_warnings) > 10:
+            st.error(f"… and {len(gate_warnings) - 10} more. Please fix before downloading.")
+
+    return rows
+
+
 # ── Validate & generate ────────────────────────────────────────────────
 
 def _validate_and_generate(current_rows: list):
@@ -603,6 +650,9 @@ def _validate_and_generate(current_rows: list):
             st.error(f"Coverage validation failed: {err}")
         st.error("Export blocked. Fix coverage gaps before downloading.")
         return
+
+    # Final quality gate — run residue detector and MDF normalizer on all Dutch translations
+    current_rows = _run_quality_gate(current_rows)
 
     if corrections:
         _save_corrections(corrections, correction_lookup)

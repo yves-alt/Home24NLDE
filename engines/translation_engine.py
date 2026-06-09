@@ -409,6 +409,10 @@ class TranslationEngine:
         # Metadata leak safety net — strip any injected label lines from any source
         translation = _strip_metadata_leaks(translation)
 
+        # MDF normalization — remove parenthetical expansions, ensure uppercase
+        from engines.qa_engine import normalize_mdf_nl
+        translation = normalize_mdf_nl(translation)
+
         # Naturalness rewrite
         rewritten, _ = self._rewriter.rewrite(translation)
         was_rewritten = rewritten != translation
