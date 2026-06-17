@@ -1,9 +1,8 @@
 import streamlit as st
-import pandas as pd
 from engines.qa_engine import get_qa_engine
-from engines.name_optimizer import get_name_optimizer
-from engines.residue_detector import get_residue_detector
-from engines.naturalness_rewriter import get_rewriter
+from engines.nl.product_name_engine import get_product_name_engine
+from engines.nl.residue_gate import get_residue_gate
+from engines.nl.terminology import get_terminology
 from auth.session import require_permission
 
 
@@ -12,7 +11,7 @@ def render():
 
     st.markdown('<div class="section-header">QA & Validation</div>', unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["QA Validator", "Name Optimizer", "Residue Detector", "Naturalness Rules"])
+    tab1, tab2, tab3, tab4 = st.tabs(["QA Validator", "Name Engine", "Residue Gate", "Terminology"])
 
     with tab1:
         st.markdown("Test the Dutch QA engine on any translation.")
@@ -46,49 +45,46 @@ def render():
                 )
 
     with tab2:
-        st.markdown("Validate and optimize Dutch product names.")
-        name = st.text_input("Product name (NL)", placeholder="Pantrykeuken Levin met keramische")
+        st.markdown("Validate and optimize Dutch product names (40-char limit, no brackets/"
+                    "commas, no forbidden endings).")
+        name = st.text_input("Product name (NL)", placeholder="Mini keuken Levin met keramische")
         if st.button("Optimize Name"):
-            optimizer = get_name_optimizer()
-            issues = optimizer.validate(name)
-            optimized, actions = optimizer.optimize(name)
+            engine = get_product_name_engine()
+            issues = engine.validate(name)
+            result = engine.optimize(name)
 
-            if issues:
-                for issue in issues:
-                    st.warning(issue)
-            if actions:
-                st.info("Actions taken: " + "; ".join(actions))
-            if optimized != name:
-                st.success(f"**Before:** {name}\n\n**After:** {optimized}")
+            for issue in issues:
+                st.warning(issue)
+            for w in result.warnings:
+                st.info(w)
+            if result.name != name:
+                st.success(f"**Before:** {name} ({len(name)} chars)\n\n"
+                           f"**After:** {result.name} ({len(result.name)} chars)")
             else:
                 st.success("Name is valid.")
 
     with tab3:
-        st.markdown("Detect German residue in a Dutch translation.")
-        text = st.text_area("Dutch text to check", height=80, placeholder="Sofa mit Schaumstoff")
+        st.markdown("Auto-fix German residue and detect anything that survives "
+                    "(export blockers).")
+        text = st.text_area("Dutch text to check", height=80, placeholder="Sofa mit Milchglas")
         if st.button("Check Residue"):
-            detector = get_residue_detector()
-            result = detector.detect_and_clean(text, auto_fix=True)
-            if result.german_residues:
-                st.warning(f"German residues found: {', '.join(result.german_residues)}")
-                st.success(f"**Cleaned:** {result.text}")
-            elif result.hybrids:
-                st.warning(f"Hybrid words found: {', '.join(result.hybrids)}")
-            else:
-                st.success("No residue detected.")
+            gate = get_residue_gate()
+            report = gate.autofix(text)
+            if report.was_fixed:
+                st.success(f"**Auto-fixed:** {report.text}")
+            if report.remaining:
+                st.error(f"Unresolved German (would block export): {', '.join(report.remaining)}")
+            elif not report.was_fixed:
+                st.success("No German residue detected.")
 
     with tab4:
-        rewriter = get_rewriter()
-        rules = rewriter.get_rules()
-        st.markdown(f"**{len(rules)} naturalness rules active**")
-        df = pd.DataFrame(list(rules.items()), columns=["German", "Dutch"])
-        st.dataframe(df, use_container_width=True, height=400)
-
-        with st.expander("Add naturalness rule"):
-            col1, col2 = st.columns(2)
-            g = col1.text_input("German pattern")
-            d = col2.text_input("Dutch replacement")
-            if st.button("Add Rule"):
-                if g and d:
-                    rewriter.add_rule(g, d)
-                    st.success(f"Added: {g} → {d}")
+        st.markdown("Test the deterministic Home24 terminology brain on any German text.")
+        term = get_terminology()
+        st.caption(f"{len(term._entries)} terminology rules active.")
+        text = st.text_area("German text", height=80, placeholder="Tischleuchte mit Milchglas, Eiche Nordic Dekor")
+        if st.button("Apply terminology"):
+            out, hits = term.apply(text)
+            st.success(f"**Result ({hits} replacement(s)):** {out}")
+            remaining = term.remaining_german(out)
+            if remaining:
+                st.warning(f"Still German: {', '.join(remaining)} — would route to GPT.")

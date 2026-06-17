@@ -238,10 +238,15 @@ def _upsert_rows(parsed: list, progress_callback=None) -> dict:
                 to_update,
             )
 
-    # Reload TM in-memory index so new entries are immediately available
+    # Reload in-memory TM indexes so new entries are immediately available
     try:
         from engines.tm_matcher import get_matcher
         get_matcher().reload()
+    except Exception:
+        pass
+    try:
+        from engines.nl.adaptive_tm import get_adaptive_tm
+        get_adaptive_tm().reload()
     except Exception:
         pass
 

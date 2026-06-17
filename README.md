@@ -1,26 +1,41 @@
-# Home24 DE → NL Localization Platform
+# Home24 DE → NL Localization Engine
 
-A production-ready Dutch localization platform for Home24 product content.
-Translates German product data to Dutch using Translation Memory, glossary matching, and GPT fallback.
+A production-grade, deterministic-first Dutch localization engine for Home24
+product content. It is built to fail loudly rather than ship German: terminology
+and Translation Memory do the bulk of the work, GPT (gpt-4o) only refines, and a
+quality gate blocks export whenever German residue, lost data, or a changed model
+name slips through.
 
 ## Architecture
 
-Translation Memory is the source of truth. GPT is used only when the TM and glossary cannot resolve a segment.
+Deterministic-first. GPT is a controlled refinement step, never the primary
+translator, and **never silently falls back to the German source** — a failed or
+incomplete GPT call flags the cell and blocks export.
 
-**Pipeline per segment:**
+**Pipeline per segment** (`engines/nl/localization_engine.py`):
 
-1. Exact TM match (SQLite, indexed by normalized source)
-2. Context engine (category-aware rules)
-3. Dutch glossary lookup
-4. RapidFuzz fuzzy match + TF-IDF semantic match
-5. GPT fallback (gpt-4o-mini)
+1. Human-reviewed correction / glossary exact match
+2. Spec terminology phrases (decor combos, compounds) — authoritative
+3. Adaptive TM — exact, or a model-preserving *adaptation* (never a blind copy)
+4. Terminology brain (full DE→NL map)
+5. GPT (gpt-4o) — only when German still remains, with model names masked
+6. Restore model names → abbreviations → terminology enforcement
+7. Product-name engine (40-char limit, forbidden endings) for the `name` column
 
-**Post-processing on every result:**
-- Naturalness rewriter (German-literal → native Dutch)
-- German residue detector and auto-cleanup
-- Glossary enforcement
-- Dutch QA validation
-- Product name optimizer
+**Then, across all cells:**
+- Multi-pass self-correction — re-fixes only the cells that fail the gate
+- German residue gate (curated lexicon + ä/ö/ü/ß orthographic signal)
+- Information-preservation validator (numbers, colors, model names, abbreviations)
+- Final quality gate — export is allowed only when zero issues remain
+
+### Key safeguards
+
+- **Model-name protection** — likely model names ("Paku", "Fit Move II") are masked
+  before TM/GPT and restored after; a lost or altered model name is a blocking error.
+- **Adaptive TM** — `Tischleuchte Paku` matched against `Tischleuchte Ledo → Tafellamp
+  Baldo` yields `Tafellamp Paku`, never the wrong model.
+- **No black-box ML** — TF-IDF, KMeans clustering and the category classifier were
+  removed; every decision is explainable.
 
 ## Requirements
 
@@ -59,20 +74,23 @@ All secrets are loaded from `.env` (locally) or Streamlit secrets (deployed). Ne
 OPENAI_API_KEY=sk-...
 APP_USER_EMAIL=your-email@home24.de
 APP_USER_PASSWORD=your-password
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-4o
 TM_FUZZY_THRESHOLD=0.75
 ```
 
 ## Features
 
-- **Translation Memory** — 37,944 Home24 NL segments, exact and fuzzy matching
-- **Dutch Glossary** — auto-built from TM, manually editable via UI
-- **Consistency engine** — same German term always maps to same Dutch term within a workbook
-- **QA engine** — detects and auto-corrects forbidden patterns, German residue, capitalization errors
-- **Name optimizer** — ensures product names never end with prepositions or incomplete phrases
-- **Segmentation** — clusters rows by category (kitchen, bathroom, sofa, lighting…) before translation
-- **Confidence scoring** — labels every result: `EXACT_TM` / `FUZZY_TM` / `GLOSSARY` / `GPT` / `LOW_CONFIDENCE`
-- **Export** — color-coded XLSX + UTF-8 CSV, prefixed `NL-<filename>`
+- **Translation Memory** — ~38k Home24 NL segments; exact + model-preserving adaptation
+- **Terminology brain** — explainable DE→NL rule set (PART 11 Home24 vocabulary)
+- **Dutch Glossary** — auto-built from TM, editable via UI; human review overrides GPT
+- **Model-name protection** — model names are never translated, lost, or swapped
+- **Residue gate** — no exported cell may contain German (ä/ö/ü/ß = hard blocker)
+- **Information preservation** — numbers, dimensions, colors and models must survive
+- **Abbreviation resolver** — MW → magnetron, BxHxT → B x H x D, 3er-Set → set van 3
+- **Product-name engine** — 40-char limit, no brackets/commas, no forbidden endings
+- **Multi-pass self-correction** — fixes only failing cells, then a final quality gate
+- **Editable preview + learning loop** — edits are saved as HUMAN_REVIEW and reused
+- **Export** — XLSX (keeps `name`) + UTF-8 CSV (optionally without `name`), prefixed `NL-<filename>`
 
 ## Project structure
 
@@ -82,46 +100,45 @@ database/
   database.py                SQLite connection manager
   migrations.py              Schema and indexes
 engines/
-  translation_engine.py      Translation orchestrator
-  tm_matcher.py              Exact + fuzzy TM matching
-  semantic_matcher.py        TF-IDF semantic matching
-  fuzzy_matcher.py           RapidFuzz wrapper
+  nl/                        Localization engine (deterministic-first)
+    localization_engine.py   DutchLocalizationEngine — orchestrator
+    terminology.py           Home24TerminologyBrain — DE→NL rule set
+    model_protector.py       ModelNameProtector — mask/restore model names
+    adaptive_tm.py           AdaptiveTranslationMemoryEngine — no blind copy
+    abbreviations.py         DutchAbbreviationResolver
+    segmentation.py          <br> / label segmentation
+    product_name_engine.py   DutchProductNameEngine — name rules
+    residue_gate.py          GermanResidueGateNL
+    info_preservation.py     InformationPreservationValidator
+    naturalness_refiner.py   DutchNaturalnessRefiner (gpt-4o, conservative)
+    quality_gate.py          QualityGate — final pass/fail
+    gpt_client.py            NLGptClient — gpt-4o, no silent German fallback
+    types.py                 CellResult
+  tm_matcher.py              TM search (TM browser UI)
   glossary_engine.py         DutchGlossaryManager
-  consistency_engine.py      DutchWorkbookConsistencyEngine
-  context_engine.py          Category-aware translation rules
-  naturalness_rewriter.py    German-literal to native Dutch rewriter
-  residue_detector.py        German residue detection and cleanup
-  qa_engine.py               Dutch QA validation
-  name_optimizer.py          Product name validator and optimizer
-  segmentation_engine.py     Row clustering by category
-  confidence_scorer.py       Confidence label and scoring
-  row_clusterer.py           ML row clusterer (TF-IDF + KMeans)
+  residue_detector.py        Legacy QA-page residue tool
+  qa_engine.py               Dutch QA validation (QA-page tool)
+  phrase_memory.py           Seeded phrase memory
 importers/
   tm_importer.py             Home24 TM Excel → SQLite
   glossary_importer.py       Glossary builder from TM
   excel_importer.py          Robust Excel workbook parser
   seed_glossary.py           Critical DE→NL vocabulary seed
 exporters/
-  xlsx_export.py             Color-coded NL-*.xlsx export
-  csv_export.py              UTF-8 CSV export
+  xlsx_export.py             NL-*.xlsx export
+  csv_export.py              UTF-8 CSV export (csv module; optional column exclude)
 ui/
   pages/                     Dashboard, Translate, TM, Glossary, QA, Settings
   components/                Shared UI components
   styling/                   Custom CSS theme
 tests/
-  tm_tests.py
-  qa_tests.py
-  consistency_tests.py
-  glossary_tests.py
+  test_localization.py       Engine + component regression suite (PART 17)
 ```
 
 ## Tests
 
 ```bash
-python3 tests/tm_tests.py
-python3 tests/qa_tests.py
-python3 tests/consistency_tests.py
-python3 tests/glossary_tests.py
+python3 -m pytest tests/ -q
 ```
 
 ## Deployment

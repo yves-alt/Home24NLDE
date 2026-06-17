@@ -24,7 +24,7 @@ def render():
 
     st.markdown("---")
 
-    tab1, tab2, tab3 = st.tabs(["Import TM", "Import Glossary", "ML Index"])
+    tab1, tab2, tab3 = st.tabs(["Import TM", "Import Glossary", "Engine"])
 
     with tab1:
         st.markdown("**Import Translation Memory from XLSX**")
@@ -79,19 +79,37 @@ def render():
                     st.error(f"Import failed: {e}")
 
     with tab3:
-        st.markdown("**TF-IDF Semantic Index**")
-        st.caption("Build the semantic index to enable TF-IDF matching (step 4 of pipeline).")
+        st.markdown("**Localization engine status**")
+        st.caption("Deterministic-first pipeline: human/glossary → terminology phrases → "
+                   "adaptive TM → terminology → gpt-4o (only when German remains).")
 
-        from engines.semantic_matcher import get_semantic_matcher
-        matcher = get_semantic_matcher()
-        if matcher.is_ready:
-            st.success("Semantic index is built and ready.")
+        from database.database import get_connection
+        from engines.nl.gpt_client import get_gpt_client
+        from engines.nl.terminology import get_terminology
+        from engines.nl.adaptive_tm import get_adaptive_tm
+
+        try:
+            with get_connection() as conn:
+                tm_count = conn.execute("SELECT COUNT(*) FROM translation_memory").fetchone()[0]
+                gl_count = conn.execute("SELECT COUNT(*) FROM glossary WHERE active=1").fetchone()[0]
+        except Exception:
+            tm_count = gl_count = 0
+
+        gpt = get_gpt_client()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("TM entries", f"{tm_count:,}")
+        c2.metric("Active glossary terms", f"{gl_count:,}")
+        c3.metric("GPT model", gpt.model if gpt.available else "—")
+
+        if gpt.available:
+            st.success(f"GPT refinement active (model: {gpt.model}).")
         else:
-            st.warning("Index not built yet.")
+            st.warning("No OpenAI key — deterministic mode only. Cells needing GPT are "
+                       "flagged and block export.")
 
-        if st.button("Build Semantic Index", type="primary"):
-            progress = st.progress(0.0)
-            with st.spinner("Building TF-IDF index from TM…"):
-                matcher.build_index(progress_callback=lambda p: progress.progress(p))
-            progress.progress(1.0)
-            st.success("Semantic index ready.")
+        st.markdown(f"Terminology rules loaded: **{len(get_terminology()._entries)}**")
+
+        if st.button("Reload TM cache", type="primary"):
+            with st.spinner("Reloading translation memory…"):
+                get_adaptive_tm().reload()
+            st.success("Translation memory cache reloaded.")

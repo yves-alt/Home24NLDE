@@ -33,16 +33,26 @@ def generate_csv_bytes(
     headers: list,
     data_rows: list,
     translation_map: dict,
+    exclude_columns: list | None = None,
 ) -> bytes:
     """Return UTF-8 BOM CSV bytes with translations applied.
 
     headers: column names in order.
     data_rows: list of row dicts with original values.
     translation_map: {row_idx (0-based): {col_name: dutch_value}}
+    exclude_columns: column names to omit entirely (e.g. ["name"] to ship a CSV
+        without the product name column while Excel keeps it).
+
+    Uses the csv module for correct delimiting, quoting and multi-line fields —
+    no manual row concatenation, so the result never collapses into one cell.
     """
-    clean_headers = [h for h in headers if h]
+    exclude = set(exclude_columns or [])
+    clean_headers = [h for h in headers if h and h not in exclude]
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=clean_headers, extrasaction="ignore")
+    writer = csv.DictWriter(
+        buf, fieldnames=clean_headers, extrasaction="ignore",
+        quoting=csv.QUOTE_MINIMAL,
+    )
     writer.writeheader()
 
     for row_idx, row_dict in enumerate(data_rows):
