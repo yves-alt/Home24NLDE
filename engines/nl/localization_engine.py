@@ -226,6 +226,11 @@ class DutchLocalizationEngine:
     # ── multi-pass self-correction (PART 7) ──────────────────────────────
 
     def self_correct(self, cells: list[CellResult]) -> list[CellResult]:
+        """Iterative gate→fix loop. Only failing cells are retried each pass.
+
+        Pass 1–3: residue + terminology + info-preservation fix cycles.
+        Pass 4 (optional): Dutch naturalness refinement for GPT-translated cells.
+        """
         for _ in range(_MAX_CORRECTION_PASSES):
             report = self._gate.evaluate(cells)
             if report.passed:
@@ -233,37 +238,64 @@ class DutchLocalizationEngine:
             failing = {(i.row, i.column) for i in report.issues}
             changed = False
             for cell in cells:
-                if (cell.row, cell.column) not in failing:
-                    continue
-                if self._fix_cell(cell):
-                    changed = True
+                if (cell.row, cell.column) in failing:
+                    if self._fix_cell(cell):
+                        changed = True
             if not changed:
                 break
+
+        # Naturalness pass (off by default — GPT cells only, safe fallback).
+        if self._use_refiner and self._refiner.available:
+            for cell in cells:
+                if cell.origin == "GPT" and not cell.gpt_failed and cell.target:
+                    refined, changed = self._refiner.refine(
+                        cell.target, cell.source, cell.model_names
+                    )
+                    if changed:
+                        cell.target = refined
+
         return cells
 
     def _fix_cell(self, cell: CellResult) -> bool:
+        """Fix a single failing cell in-place. Returns True if anything changed."""
         before = cell.target
 
-        # German residue → deterministic auto-fix first.
-        report = self._residue.autofix(cell.target)
-        if report.was_fixed:
-            cell.target = report.text
+        # Step 1: Deterministic residue autofix.
+        res_report = self._residue.autofix(cell.target)
+        if res_report.was_fixed:
+            cell.target = res_report.text
 
-        # Still German and GPT available → targeted re-translation of the source.
-        if self._residue.scan(cell.target) and self.gpt_active:
+        # Step 2: Terminology re-enforcement (catches residue the autofix missed).
+        enforced, hits = self._term.apply(cell.target)
+        if hits:
+            cell.target = enforced
+
+        # Step 3: Re-apply abbreviations now so the info-preservation check sees
+        # the expanded forms (e.g. MW → magnetron, 3er-Set → set van 3).
+        cell.target = self._abbrev.resolve(cell.target).text
+
+        # Step 4: If residue still present OR information was lost → GPT retry.
+        still_dirty = bool(self._residue.scan(cell.target))
+        info_lost = not self._info.validate(cell.source, cell.target, cell.model_names).ok
+        if (still_dirty or info_lost) and self.gpt_active:
             prot = self._protector.protect(cell.source)
-            res = self._gpt.translate(prot.text, cell.column, COLUMN_RULES.get(cell.column, ""))
-            if res.ok and res.text:
-                restored = self._protector.restore(res.text, prot.mapping)
-                enforced, _ = self._term.apply(restored)
-                if self._residue.is_clean(enforced):
-                    cell.target = enforced
+            gpt_res = self._gpt.translate(
+                prot.text, cell.column, COLUMN_RULES.get(cell.column, "")
+            )
+            if gpt_res.ok and gpt_res.text:
+                restored = self._protector.restore(gpt_res.text, prot.mapping)
+                enforced2, _ = self._term.apply(restored)
+                enforced2 = self._abbrev.resolve(enforced2).text
+                if self._residue.is_clean(enforced2):
+                    cell.target = enforced2
                     cell.gpt_failed = False
 
-        # Re-apply abbreviations + name rules.
-        cell.target = self._abbrev.resolve(cell.target).text
+        # Step 5: Name column rules.
         if cell.column == "name":
-            cell.target = self._name.optimize(cell.target).name
+            name_res = self._name.optimize(cell.target)
+            cell.target = name_res.name
+            if name_res.warnings and name_res.warnings not in cell.warnings:
+                cell.warnings = list(set(cell.warnings) | set(name_res.warnings))
 
         return cell.target != before
 

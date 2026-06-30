@@ -17,13 +17,39 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from engines.nl.terminology import _COLORS
-
 _NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
-# Appliance abbreviations whose expansion must appear if the abbrev was present.
+# Appliance abbreviations whose NL expansion must appear if the abbrev was present in source.
 _ABBREV_REQUIRED = {
     "MW": "magnetron",
     "GSP": "vaatwasser",
+    "KS": "koelkast",
+    "KGK": "koel-vriescombinatie",
+}
+
+# German color → Dutch form that must appear in the target.
+# (Mirrors _COLORS from terminology; extracted here to avoid circular import.)
+_COLOR_MAP = {
+    "Schwarz": "zwart",
+    "Schwarzbraun": "zwartbruin",
+    "Weiß": "wit", "Weiss": "wit",
+    "Hellgrau": "lichtgrijs",
+    "Dunkelgrau": "donkergrijs",
+    "Grau": "grijs",
+    "Hellbraun": "lichtbruin",
+    "Dunkelbraun": "donkerbruin",
+    "Braun": "bruin",
+    "Hellblau": "lichtblauw",
+    "Dunkelblau": "donkerblauw",
+    "Blau": "blauw",
+    "Grün": "groen",
+    "Olivgrün": "olijfgroen",
+    "Gelb": "geel",
+    "Rot": "rood",
+    "Violett": "paars",
+    "Türkis": "turquoise",
+    "Silber": "zilver",
+    "Anthrazit": "antraciet",
+    "Mehrfarbig": "meerkleurig",
 }
 
 
@@ -54,7 +80,7 @@ class InformationPreservationValidator:
                 issues.append(f"number '{num}' missing from translation")
 
         # 2. Colors — German color must be represented by its Dutch form.
-        for de, nl in _COLORS.items():
+        for de, nl in _COLOR_MAP.items():
             if re.search(rf"\b{re.escape(de)}\b", src, re.IGNORECASE):
                 if nl.lower() not in tgt_low:
                     issues.append(f"color '{de}' not represented as '{nl}'")
@@ -68,6 +94,11 @@ class InformationPreservationValidator:
         for abbr, expansion in _ABBREV_REQUIRED.items():
             if re.search(rf"\b{abbr}\b", src) and expansion not in tgt_low:
                 issues.append(f"abbreviation '{abbr}' not expanded to '{expansion}'")
+
+        # 5. Dimension label B x H x T → B x H x D preservation.
+        if re.search(r"\bB\s*[xX]\s*H\s*[xX]\s*T\b", src):
+            if not re.search(r"\bB\s*[xX]\s*H\s*[xX]\s*D\b", tgt, re.IGNORECASE):
+                issues.append("dimension label 'B x H x T' not converted to 'B x H x D'")
 
         return PreservationReport(issues)
 

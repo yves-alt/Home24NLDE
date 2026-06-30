@@ -46,6 +46,21 @@ PART17 = [
     ("colorDetail", "Bezug: beige<br>Füße: schwarz", "Bekleding: beige<br>Poten: zwart"),
 ]
 
+# Additional regression cases beyond Part 17.
+EXTRA_CASES = [
+    ("materialDetail", "Marmor Schwarz Dekor", "zwarte marmerlook"),
+    ("materialDetail", "Eiche Sägerau Dekor", "grof gezaagde eikenlook"),
+    ("materialDetail", "Nussbaum Dekor", "notenlook"),
+    ("materialDetail", "Beton Dekor", "betonlook"),
+    ("colorDetail", "Hellbraun", "lichtbruin"),
+    ("colorDetail", "Schwarzbraun", "zwartbruin"),
+    ("otherMeasurements", "Maße B x H x T", "Afmetingen B x H x D"),
+    ("otherMeasurements", "Maße (B x H x T)", "afmetingen (B x H x D)"),
+    ("name", "Eck-Wandregal Arik", "Open hoek-wandkast Arik"),
+    ("name", "Wandregal Levin", "Open wandkast Levin"),
+    ("deliveryScope", "Kombi aus Tisch und Stuhl", "combinatie van tafel en stoel"),
+]
+
 
 @pytest.mark.parametrize("column,source,expected", PART17)
 def test_part17_cases(engine, column, source, expected):
@@ -61,6 +76,15 @@ def test_part17_all_pass_quality_gate(engine):
     assert report.passed, [(i.row, i.issue) for i in report.issues]
 
 
+@pytest.mark.parametrize("column,source,expected", EXTRA_CASES)
+def test_extra_regression_cases(engine, column, source, expected):
+    result = engine.translate_cell(1, column, source)
+    assert result.target.lower() == expected.lower(), (
+        f"[{column}] '{source}' → got '{result.target}', expected '{expected}'"
+    )
+    assert get_residue_gate().scan(result.target) == []
+
+
 # ── terminology brain ───────────────────────────────────────────────────
 
 def test_terminology_colon_vs_standalone_label():
@@ -72,6 +96,33 @@ def test_terminology_colon_vs_standalone_label():
 def test_terminology_flags_remaining_german():
     t = get_terminology()
     assert "Bezug" in get_terminology().remaining_german("dit is Bezug")
+
+
+def test_terminology_critical_german_new_words():
+    t = get_terminology()
+    # New additions to CRITICAL_GERMAN must be detected.
+    for word in ("Altholz", "Eisen", "Marmor", "Stahl", "Seide", "Violett",
+                 "Schwarzbraun", "Mehrfarbig", "Hell", "Dunkel", "Anthrazit"):
+        found = t.remaining_german(f"stoel {word} tafel")
+        assert word in found or word.lower() in [w.lower() for w in found], (
+            f"'{word}' not detected as German residue"
+        )
+
+
+def test_terminology_phrase_marmor_variants():
+    t = get_terminology()
+    assert t.apply("Marmor Weiß Dekor")[0] == "witte marmerlook"
+    assert t.apply("Marmor Weiss Dekor")[0] == "witte marmerlook"
+    assert t.apply("Marmor Schwarz Dekor")[0] == "zwarte marmerlook"
+    assert t.apply("Altholz Dekor")[0] == "oud-houtlook"
+    assert t.apply("Eiche Sägerau Dekor")[0] == "grof gezaagde eikenlook"
+
+
+def test_terminology_flammig_conversion():
+    t = get_terminology()
+    assert t.apply("1-flammig")[0] == "1-lichts"
+    assert t.apply("3-flammig")[0] == "3-lichts"
+    assert t.apply("Deckenleuchte 5-flammig")[0] == "plafondlamp 5-lichts"
 
 
 # ── model protector ─────────────────────────────────────────────────────
@@ -162,8 +213,21 @@ def test_info_preservation_numbers_colors_models():
     iv = get_info_validator()
     assert iv.validate("Tafel 85 cm", "Tafel breed").issues  # number lost
     assert iv.validate("Tafel 85 cm", "Tafel 85 cm").ok
-    assert iv.validate("Stoel Hellbraun", "Stoel groen").issues  # color not represented
+    assert iv.validate("Stoel Hellbraun", "Stoel groen").issues  # wrong color
+    assert iv.validate("Stoel Hellbraun", "Stoel lichtbruin").ok   # correct color
     assert iv.validate("Lamp Paku", "Lamp", model_names=["Paku"]).issues  # model lost
+
+
+def test_info_preservation_dimension_label():
+    iv = get_info_validator()
+    assert iv.validate("Maße B x H x T: 80 x 60 x 40 cm", "Afmetingen B x H x D: 80 x 60 x 40 cm").ok
+    assert iv.validate("Maße B x H x T: 80 x 60 x 40 cm", "Afmetingen B x H x T: 80 x 60 x 40 cm").issues
+
+
+def test_info_preservation_appliance_abbrev():
+    iv = get_info_validator()
+    assert iv.validate("Küche mit MW und GSP", "Keuken met magnetron en vaatwasser").ok
+    assert iv.validate("Küche mit MW", "Keuken met koelkast").issues  # MW not expanded
 
 
 # ── quality gate ─────────────────────────────────────────────────────────

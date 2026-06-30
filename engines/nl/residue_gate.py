@@ -11,9 +11,15 @@ from dataclasses import dataclass, field
 
 from engines.nl.terminology import get_terminology
 
-# A few extra residue markers beyond the terminology critical list.
+# Extra residue markers beyond the terminology critical list.
 _EXTRA_RESIDUE = re.compile(
-    r"\b(?:\d+\s*-?\s*flammig|Kombi\s+aus|Stk\.?|Stück|ca\.)\b", re.IGNORECASE
+    r"\b(?:\d+\s*-?\s*flammig|Kombi\s+aus|Stk\.?|Stück|ca\."
+    r"|Pflegeleicht|platzsparend|multifunktional|hochwertig|gemütlich"
+    r"|Wohnzimmer|Schlafzimmer|Esszimmer|Kinderzimmer|Badezimmer"
+    r"|Stauraum|Lieferung|Verpackung|Montage(?!\s*-?handle)"
+    r"|bestehend\s+aus|in\s+verschiedenen\s+(?:Farben|Größen)"
+    r"|erhältlich|geliefert|enthalten|zzgl|MwSt)\b",
+    re.IGNORECASE,
 )
 
 

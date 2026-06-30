@@ -20,7 +20,8 @@ from engines.nl.terminology import _PRODUCT_TYPES, _COLORS, _MATERIALS, _MISC, _
 # Curated, high-confidence model names seen in Home24 catalogs.
 CURATED_MODELS = {
     "paku", "pilo", "banyo", "arik", "ingrid", "ledo", "malia", "levin",
-    "baldo", "fit", "move", "nordic",
+    "baldo", "fit", "move", "nordic", "oslo", "alba", "luna", "rio",
+    "vera", "kai", "nora", "felix", "aris", "solo", "duo", "trio",
 }
 
 # Words that look capitalized but are ordinary vocabulary — never masked.

@@ -22,23 +22,44 @@ import re
 # ── 1. Phrase patterns (multi-word, highest priority) ──────────────────
 # Decor / wood-look combinations reorder and must run before single words.
 _PHRASES: list[tuple[str, str]] = [
+    # Wood-look with explicit style names (most specific first)
     (r"\bEiche\s+Sägerau\s+Dekor\b", "grof gezaagde eikenlook"),
     (r"\bEiche\s+Nordic\s+Dekor\b", "Nordic eikenlook"),
     (r"\bEiche\s+Hell\s+Dekor\b", "lichte eikenlook"),
     (r"\bEiche\s+Hellbraun\s+Dekor\b", "lichtbruine eikenlook"),
-    (r"\bMarmor\s+Wei[ß|s]s?\s+Dekor\b", "witte marmerlook"),
+    (r"\bMarmor\s+Wei(?:ß|ss?)\s+Dekor\b", "witte marmerlook"),
     (r"\bMarmor\s+Schwarz\s+Dekor\b", "zwarte marmerlook"),
-    (r"\bAlthol[z]\s+Dekor\b", "oud-houtlook"),
+    (r"\bAltholz\s+Dekor\b", "oud-houtlook"),
     (r"\bNussbaum\s+Dekor\b", "notenlook"),
     (r"\bBeton\s+Dekor\b", "betonlook"),
     (r"\bEiche\s+Dekor\b", "eikenlook"),
-    (r"\bbestehend\s+aus\b", "bestaande uit"),
+    # Wood species without Dekor (standalone)
+    (r"\bEiche\s+Sägerau\b", "grof gezaagde eiken"),
+    (r"\bEiche\s+Nordic\b", "Nordic eiken"),
+    (r"\bEiche\s+Hell\b", "lichte eiken"),
+    # Compound product types — in _PHRASES so they override TM when clean.
+    (r"\bEck-Wandregal\b", "open hoek-wandkast"),
+    (r"\bSpülenunterschrank\b", "spoelkast"),
+    (r"\bMineralite-Einbauspüle\b", "Mineralite-inbouwspoelbak"),
+    (r"\bLED-Einbauleuchte\b", "LED-inbouwlamp"),
+    (r"\bÜberlaufgarnitur\b", "overloopgarnituur"),
+    # Structural phrases
     (r"\bset\s+bestehend\s+aus\b", "set bestaande uit"),
+    (r"\bbestehend\s+aus\b", "bestaande uit"),
     (r"\bohne\s+Dekoration\b", "zonder decoratie"),
     (r"\bmit\s+Dekoration\b", "met decoratie"),
     (r"\bKombi\s+aus\b", "combinatie van"),
     (r"\binkl(?:usive)?\s+Montage\b", "incl. montage"),
     (r"\bexkl(?:usive)?\s+Montage\b", "excl. montage"),
+    (r"\bPflegeleicht\s+und\s+wetterfest\b", "onderhoudsvriendelijk en weerbestendig"),
+    (r"\bPflegeleicht\s+und\s+strapazierfähig\b", "onderhoudsvriendelijk en slijtvast"),
+    (r"\bMaße\s*\(\s*B\s*[xX]\s*H\s*[xX]\s*T\s*\)", "afmetingen (B x H x D)"),
+    (r"\bMaße\s*\(\s*B\s*[xX]\s*T\s*[xX]\s*H\s*\)", "afmetingen (B x D x H)"),
+    (r"\baus\s+massivem\s+Holz\b", "van massief hout"),
+    (r"\baus\s+Massivholz\b", "van massief hout"),
+    (r"\bim\s+skandinavischen\s+Stil\b", "in Scandinavische stijl"),
+    (r"\bim\s+Landhausstil\b", "in landelijke stijl"),
+    (r"\bim\s+Industriestil\b", "in industriële stijl"),
     # n-flammig → n-lichts (lighting)
     (r"\b(\d+)\s*-?\s*flammig\b", r"\1-lichts"),
 ]
@@ -113,6 +134,29 @@ _PRODUCT_TYPES: dict[str, str] = {
     "Herrendiener": "herenknecht",
     "Tellerstand": "bordenstandaard",
     "Duschmatte": "douchemat",
+    # Basic furniture words (also in residue_detector, added here so no GPT needed)
+    "Esstisch": "eettafel",
+    "Couchtisch": "salontafel",
+    "Beistelltisch": "bijzettafel",
+    "Schreibtisch": "bureau",
+    "Tisch": "tafel",
+    "Stuhl": "stoel",
+    "Sessel": "fauteuil",
+    "Schrank": "kast",
+    "Regal": "rek",
+    "Bett": "bed",
+    "Sofa": "bank",
+    "Kleiderschrank": "kledingkast",
+    "Nachttisch": "nachtkastje",
+    "Kommode": "ladekast",
+    "Badewanne": "bad",
+    "Dusche": "douche",
+    "Spiegel": "spiegel",
+    "Teppich": "tapijt",
+    "Kissen": "kussen",
+    "Decke": "deken",
+    "Lampe": "lamp",
+    "Leuchte": "lamp",
 }
 
 # ── 4a. Misc terms (canonical, lowercase unless special) ───────────────
@@ -126,6 +170,18 @@ _MISC: dict[str, str] = {
     "Edelstahl": "rvs",
     "Bettwäsche": "beddengoed",
     "Rollen": "rollen",
+    "Liegehöhe": "lighoogte",
+    "Sitzhöhe": "zithoogte",
+    "Armlehnenhoehe": "armleuninghoogte",
+    "Armlehnnhöhe": "armleuninghoogte",
+    "Pflegeleicht": "onderhoudsvriendelijk",
+    "platzsparend": "ruimtebesparend",
+    "multifunktional": "multifunctioneel",
+    "Softclose": "soft-close",
+    "TÜV-geprüft": "TÜV-gecertificeerd",
+    "FSC-zertifiziert": "FSC-gecertificeerd",
+    "modernes Design": "modern design",
+    "Lederoptik": "lederimitatie",
 }
 
 # ── 4b. Colors (always lowercase) ──────────────────────────────────────
@@ -159,9 +215,17 @@ _COLORS: dict[str, str] = {
     "Sand": "zand",
     "Beige": "beige",
     "Anthrazit": "antraciet",
+    "Schwarzbraun": "zwartbruin",
+    "Hellblau": "lichtblauw",
+    "Dunkelblau": "donkerblauw",
+    "Olivgrün": "olijfgroen",
+    "Oliv": "olijfgroen",
     "Hell": "licht",
     "Dunkel": "donker",
     "Mehrfarbig": "meerkleurig",
+    "Violett": "paars",
+    "Türkis": "turquoise",
+    "Silber": "zilver",
 }
 
 # ── 4c. Materials / textiles (always lowercase) ────────────────────────
@@ -193,11 +257,18 @@ _MATERIALS: dict[str, str] = {
     "Fichte": "vurenhout",
     "Akazie": "acaciahout",
     "Esche": "essenhout",
+    "Stahl": "staal",
+    "Seide": "zijde",
+    "Eisen": "IJzer",          # duplicate of _MISC; longest-first ordering handles both
     "lackiert": "gelakt",
     "beschichtet": "gecoat",
     "foliert": "gefolieerd",
     "pulverbeschichtet": "poedergecoat",
     "massiv": "massief",
+    "handgemacht": "handgemaakt",
+    "handgefertigt": "handgemaakt",
+    "nachhaltig": "duurzaam",
+    "umweltfreundlich": "milieuvriendelijk",
 }
 
 # ── 4d. Function / connector words (lowercase) ─────────────────────────
@@ -265,13 +336,21 @@ def _build_entries() -> list[tuple[re.Pattern, object]]:
 # Critical German tokens that must NEVER survive to export. Used by the
 # residue gate as the hard blocker list (auto-fix is attempted first).
 CRITICAL_GERMAN = re.compile(
-    r"\b(?:ohne|mit|und|oder|für|von|aus|inkl|inklusive|exkl|exklusive"
-    r"|Schwarz|Wei[ß|s]s?|Grau|Hellgrau|Dunkelgrau|Braun|Hellbraun|Grün|Gelb|Blau|Rot|Dekor|Decor"
-    r"|Metall|Holz|Leder|Kunststoff|Eiche|Nussbaum|Buche|Edelstahl"
+    r"\b(?:ohne|mit|und|oder|für|von|aus|inkl|inklusive|exkl|exklusive|Kombi"
+    # Colors — German-only, unambiguous
+    r"|Schwarz|Schwarzbraun|Wei(?:ß|ss?)|Grau|Hellgrau|Dunkelgrau"
+    r"|Braun|Hellbraun|Dunkelbraun|Grün|Olivgrün|Oliv|Gelb"
+    r"|Blau|Hellblau|Dunkelblau|Rot|Violett|Türkis|Silber|Anthrazit"
+    r"|Mehrfarbig|Sandfarben|Hell|Dunkel|Dekor|Decor"
+    # Materials — German-only
+    r"|Metall|Holz|Leder|Kunststoff|Eiche|Nussbaum|Buche|Edelstahl|Altholz"
+    r"|Marmor|Stahl|Seide|Eisen"
     r"|pulverbeschichtet|lackiert|beschichtet|foliert|massiv"
+    # Labels / furniture terms
     r"|Bezug|Füße|Füsse|Fuß|Gestell|Korpus|Farbe|Microfaser|Mikrofaser|Samtstoff|Baumwolle|Leinen|Wolle"
     r"|Schublade|Schubladen|Lieferumfang|Maße|Breite|Höhe|Tiefe"
     r"|Arbeitsplatte|Sitzfläche|Rückenlehne|Armlehne|Kopfteil|Tischplatte|Matratze"
+    # Lighting / kitchen / storage
     r"|Tischleuchte|Deckenleuchte|Steckerleuchte|Einbauleuchte|Wandleuchte|Stehleuchte"
     r"|Singleküche|Miniküche|Unterschrank|Oberschrank|Hängeschrank|Wandregal|Bartisch"
     r"|Milchglas|Mikrowelle|Beleuchtung|Nische|Frontblende|Spülenunterschrank|Überlaufgarnitur"
