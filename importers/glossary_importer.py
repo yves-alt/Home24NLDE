@@ -3,7 +3,7 @@ from collections import defaultdict, Counter
 from datetime import datetime
 
 from database.database import get_connection
-from importers.tm_importer import normalize_segment
+from importers.tm_importer import normalize_segment, _upsert_rows
 
 
 BRAND_PATTERNS = [
@@ -139,3 +139,154 @@ def import_glossary_from_excel(filepath: str) -> dict:
                 pass
 
     return {"inserted": inserted}
+
+
+# ── Official DE→NL glossary import (authoritative source, PART 1 §9) ───────
+#
+# Rows are classified into three destinations rather than dumped into one
+# table, reusing the machinery each destination already has:
+#   - "Label:" rows        -> glossary table (source_type=OFFICIAL_GLOSSARY);
+#                              terminology.py's colon-label layer picks these up.
+#   - 2-word "Type Model"  -> translation_memory, via the SAME upsert path
+#     rows (e.g. "Klapp-      importers/tm_importer.py already uses. AdaptiveTM
+#     tisch Raza")            extracts the Klapptisch {MODEL} -> Klaptafel
+#                              {MODEL} pattern from this at lookup time — no new
+#                              matching logic needed.
+#   - everything else       -> glossary table (general vocabulary).
+#
+# "DE == NL" rows (no information) and case-insensitive duplicate source terms
+# (kept: first occurrence only) are skipped and counted, not silently dropped.
+
+def _pick_glossary_sheet(wb):
+    for name in wb.sheetnames:
+        low = name.lower()
+        if "glossary" in low or "technical" in low or "woordenlijst" in low:
+            return wb[name]
+    return wb.active
+
+
+def _looks_like_product_model(source: str, target: str) -> bool:
+    """True when a 2-word DE term is "ProductType ModelName" rather than an
+    ordinary 2-word phrase (e.g. "Akazie Hell" material+color, or "Beleuchteter
+    Spiegel" adjective+noun).
+
+    Model-shaped-token alone (ModelNameProtector's heuristic — any capitalized
+    word outside its small hardcoded vocabulary) is far too broad here: German
+    capitalizes every noun, so most ordinary 2-word phrases in a 14k-row
+    glossary would false-positive. The reliable signal is that the DATA itself
+    already proves it — a real model name is never translated, so it survives
+    as the target's last word too (e.g. "Klapptisch Raza" -> "Klaptafel Raza").
+    """
+    words = source.split()
+    if len(words) != 2:
+        return False
+    model = words[1]
+    if not (model[:1].isupper() or any(ch.isdigit() for ch in model)):
+        return False
+    tgt_words = target.split()
+    return bool(tgt_words) and tgt_words[-1] == model
+
+
+def import_official_glossary(file_bytes: bytes, progress_callback=None) -> dict:
+    """Import the official DE→NL furniture glossary from raw .xlsx bytes.
+
+    Idempotent — safe to re-run when the user supplies an updated file.
+    Returns a stats dict: total, de_eq_nl_skipped, duplicates_skipped
+    (with the list of skipped (source, first_target, dropped_target) triples
+    under 'conflicts'), labels_inserted, general_inserted, tm_pairs_inserted.
+    """
+    import io
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    ws = _pick_glossary_sheet(wb)
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return {"total": 0}
+
+    # Locate the DE/NL columns by header if present, else assume col 0/1.
+    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
+    src_col = next((i for i, h in enumerate(header) if "german" in h or h in ("de", "duits")), 0)
+    tgt_col = next((i for i, h in enumerate(header) if "dutch" in h or h in ("nl", "nederlands")), 1)
+    data_rows = rows[1:] if header and (header[src_col] or header[tgt_col]) else rows
+
+    total = len(data_rows)
+    seen: dict[str, str] = {}          # lowercased source -> first target kept
+    conflicts: list[tuple[str, str, str]] = []
+    de_eq_nl = 0
+    glossary_rows: list[tuple[str, str, str]] = []   # (source_term_lower, target_term, category)
+    tm_pairs: list[dict] = []
+
+    for i, row in enumerate(data_rows):
+        src = str(row[src_col]).strip() if src_col < len(row) and row[src_col] else ""
+        tgt = str(row[tgt_col]).strip() if tgt_col < len(row) and row[tgt_col] else ""
+        if progress_callback and i % 1000 == 0:
+            progress_callback(i / total if total else 1.0)
+        if not src or not tgt:
+            continue
+        if normalize_segment(src) == normalize_segment(tgt):
+            de_eq_nl += 1
+            continue
+
+        key = src.lower()
+        if key in seen:
+            conflicts.append((src, seen[key], tgt))
+            continue
+        seen[key] = tgt
+
+        if src.endswith(":"):
+            glossary_rows.append((key, tgt, "label"))
+        elif _looks_like_product_model(src, tgt):
+            tm_pairs.append({
+                "source": src, "target": tgt, "freq": 100,
+                "created": None, "created_by": "OFFICIAL_GLOSSARY", "source_id": None,
+            })
+        else:
+            glossary_rows.append((key, tgt, _detect_term_category(key)))
+
+    labels_inserted = general_inserted = 0
+    with get_connection() as conn:
+        for source_term, target_term, category in glossary_rows:
+            try:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO glossary "
+                    "(source_term, target_term, category, frequency, confidence, source_type, active) "
+                    "VALUES (?,?,?,100,0.98,'OFFICIAL_GLOSSARY',1)",
+                    (source_term, target_term, category),
+                )
+                if cur.rowcount:
+                    if category == "label":
+                        labels_inserted += 1
+                    else:
+                        general_inserted += 1
+            except Exception:
+                pass
+
+    tm_stats = _upsert_rows(tm_pairs, progress_callback=None) if tm_pairs else {"inserted": 0, "updated": 0}
+
+    # Refresh in-memory caches so the import applies immediately.
+    try:
+        from engines.nl.terminology import get_terminology
+        get_terminology().reload()
+    except Exception:
+        pass
+    try:
+        from engines.nl.model_protector import get_model_protector
+        get_model_protector().reload()
+    except Exception:
+        pass
+
+    if progress_callback:
+        progress_callback(1.0)
+
+    return {
+        "total": total,
+        "de_eq_nl_skipped": de_eq_nl,
+        "duplicates_skipped": len(conflicts),
+        "conflicts": conflicts,
+        "labels_inserted": labels_inserted,
+        "general_inserted": general_inserted,
+        "tm_pairs_inserted": tm_stats.get("inserted", 0),
+        "tm_pairs_updated": tm_stats.get("updated", 0),
+    }

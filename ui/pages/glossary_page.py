@@ -20,7 +20,7 @@ def render():
 
     st.markdown("---")
 
-    tab1, tab2, tab3 = st.tabs(["Browse & Edit", "Add Term", "Export"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Browse & Edit", "Add Term", "Export", "Import Official Glossary"])
 
     with tab1:
         col_a, col_b, col_c = st.columns([3, 2, 1])
@@ -91,3 +91,56 @@ def render():
             with open(path, "rb") as f:
                 st.download_button("Download Glossary", f, file_name="DE_NL_Furniture_Glossary.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    with tab4:
+        _render_official_glossary_import()
+
+
+def _render_official_glossary_import():
+    st.markdown("### Import the official DE→NL glossary")
+    st.markdown(
+        "Upload the authoritative DE→NL furniture glossary (two columns: German term, "
+        "Dutch term — a sheet named like *Clean Technical Glossary* is auto-detected, "
+        "otherwise the first sheet is used). Rows are classified automatically:\n\n"
+        "- **`Label:` rows** → the terminology brain's colon-label layer.\n"
+        "- **2-word `ProductType ModelName` rows** (the model name reappears unchanged "
+        "in the Dutch term) → Translation Memory, so the adaptive TM can generalize the "
+        "pattern to other products with the same type.\n"
+        "- **everything else** → general glossary vocabulary.\n\n"
+        "Re-importing is safe — existing entries are never duplicated, and the terminology "
+        "brain picks up changes immediately without an app restart."
+    )
+    uploaded = st.file_uploader("Official glossary file", type=["xlsx"], key="official_glossary_file")
+    if not uploaded:
+        return
+    st.markdown(f"**Selected file:** {uploaded.name}  ({uploaded.size:,} bytes)")
+    if st.button("Import Official Glossary", type="primary", use_container_width=True):
+        from importers.glossary_importer import import_official_glossary
+
+        progress = st.progress(0.0)
+        status = st.empty()
+
+        def cb(p):
+            progress.progress(min(p, 1.0))
+            status.text(f"Processing… {p:.0%}")
+
+        try:
+            stats = import_official_glossary(uploaded.getvalue(), progress_callback=cb)
+            progress.progress(1.0)
+            status.empty()
+            st.success(
+                f"Import complete — **{stats['total']:,} rows** processed: "
+                f"**{stats['labels_inserted']:,} label(s)**, "
+                f"**{stats['general_inserted']:,} general term(s)**, "
+                f"**{stats['tm_pairs_inserted']:,} product+model pattern(s)** added to Translation Memory "
+                f"({stats['tm_pairs_updated']:,} updated). "
+                f"Skipped: **{stats['de_eq_nl_skipped']:,}** identical DE=NL rows, "
+                f"**{stats['duplicates_skipped']:,}** duplicate source terms (first occurrence kept)."
+            )
+            if stats["conflicts"]:
+                with st.expander(f"Duplicate source terms — first kept, rest dropped ({len(stats['conflicts'])})"):
+                    df = pd.DataFrame(stats["conflicts"], columns=["Source term", "Kept target", "Dropped target"])
+                    st.dataframe(df, use_container_width=True, height=300)
+        except Exception as e:
+            status.empty()
+            st.error(f"Import failed: {e}")

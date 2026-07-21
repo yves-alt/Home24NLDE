@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from database.database import get_connection
-from engines.tm_matcher import get_matcher
+from engines.nl.adaptive_tm import get_adaptive_tm, TMKind
 from auth.session import require_permission, current_user
 
 
@@ -85,19 +85,23 @@ def render():
         st.dataframe(df, use_container_width=True, height=500)
 
     with tab3:
-        st.markdown("Test the TM matching pipeline on any German term.")
-        test_input = st.text_input("German term to test", placeholder="e.g. Singleküche")
+        st.markdown(
+            "Test the **real adaptive TM** pipeline — exact matches and model-preserving pattern "
+            "matches (e.g. a TM row for `Klapptisch Raza → Klaptafel Raza` generalizes to "
+            "`Klapptisch Sola → Klaptafel Sola` without ever copying the wrong model name)."
+        )
+        test_input = st.text_input("German term to test", placeholder="e.g. Klapptisch Sola")
         if test_input:
-            matcher = get_matcher()
-            match = matcher.match(test_input)
-            if match:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Match Type", match.match_type.value)
-                c2.metric("Score", f"{match.score:.0%}")
-                c3.metric("Frequency", match.frequency)
-                st.success(f"**{test_input}** → **{match.target}**")
+            result = get_adaptive_tm().lookup(test_input)
+            if result.kind != TMKind.NONE:
+                c1, c2 = st.columns(2)
+                c1.metric("Match Type", result.kind.value)
+                c2.metric("Score", f"{result.score:.0%}")
+                st.success(f"**{test_input}** → **{result.target}**")
+                if result.note:
+                    st.caption(result.note)
             else:
-                st.warning("No TM match found — would fall back to AI.")
+                st.warning("No exact or model-adapted TM match found — would fall back to terminology/GPT.")
 
 def _render_import_tab():
     st.markdown("### Import Translation Memory")

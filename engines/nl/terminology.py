@@ -1,22 +1,36 @@
 """Home24.nl terminology brain.
 
-The single deterministic source of DE→NL terminology. Everything here is
-rule-based and explainable — no ML, no fuzzy guessing. Glossary and human
-review (loaded from the database) override these defaults.
+The single deterministic source of DE→NL terminology. Curated defaults below are
+merged with the official DE→NL furniture glossary (imported via
+``importers/glossary_importer.py`` into the ``glossary`` table,
+``source_type='OFFICIAL_GLOSSARY'``) — the official glossary wins on conflict,
+per the documented precedence: protected tokens > business rules > official
+glossary > reviewed TM > these built-in rules > GPT > fallback.
 
 Application order matters and is fixed:
   1. Phrase patterns   (decor combos, multi-word compounds)  — highest priority
   2. Colon labels      (Bezug: → Bekleding:)
   3. Product types     (Tischleuchte → Tafellamp)            — case-matched
-  4. Function words / colors / materials / misc terms
+  4. Function words / colors / materials / misc terms (+ official glossary)
   5. Dutch style normalization (slash spacing, IJ, whitespace)
 
 Colors and materials always render lowercase (Home24.nl style); product types
 match the source capitalization so "Tischleuchte Paku" → "Tafellamp Paku" but
 "… tischleuchte" → "… tafellamp".
+
+Layers 2–4 are matched with a tokenizer + dict lookup (unigram/bigram) rather
+than one regex per term. The official glossary is ~14k entries — one
+``pattern.subn()`` call per term (the original design) would mean thousands of
+full-text scans per cell. Tokenizing once and doing O(1) dict lookups per
+token/bigram keeps ``apply()`` fast regardless of glossary size, and naturally
+prefers a 2-word match over a 1-word match (longest-match-first) without a
+giant alternation regex, which has practical size/compile-time limits at this
+scale.
 """
 
 import re
+
+from database.database import get_connection
 
 
 # ── 1. Phrase patterns (multi-word, highest priority) ──────────────────
@@ -290,47 +304,166 @@ _FUNCTION: dict[str, str] = {
 }
 
 
-# ── compile ─────────────────────────────────────────────────────────────
+# ── tokenizer + dict-layer matching (scales to a 14k-term glossary) ────
+
+# Word token = letters/digits, allowing interior hyphens/dots (compounds like
+# "Eck-Wandregal"); everything else (spaces, punctuation) is its own token.
+_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ0-9]+(?:[.\-][A-Za-zÀ-ÿ0-9]+)*|\s+|[^\sA-Za-zÀ-ÿ0-9]+")
+
+
+class _DictLayer:
+    """A case-insensitive DE→NL term layer matched by tokenizing the input and
+    doing O(1) dict lookups (2-word bigram first, then 1-word), instead of one
+    regex per term. Later-merged dicts win on key collision (used to let the
+    official glossary override curated defaults)."""
+
+    __slots__ = ("unigrams", "bigrams", "size")
+
+    def __init__(self, *sources: dict):
+        merged: dict[str, str] = {}
+        for src in sources:
+            merged.update(src)
+        self.unigrams: dict[str, str] = {}
+        self.bigrams: dict[str, str] = {}
+        for de, nl in merged.items():
+            key = de.strip().lower()
+            if not key:
+                continue
+            if " " in key:
+                self.bigrams[key] = nl
+            else:
+                self.unigrams[key] = nl
+        self.size = len(self.unigrams) + len(self.bigrams)
+
+    def apply(self, text: str) -> tuple[str, int]:
+        if not text or self.size == 0:
+            return text, 0
+        tokens = _TOKEN_RE.findall(text)
+        n = len(tokens)
+        out: list[str] = []
+        hits = 0
+        i = 0
+        while i < n:
+            tok = tokens[i]
+            if tok[:1].isalnum():
+                if self.bigrams:
+                    j = i + 1
+                    if j < n and tokens[j].isspace():
+                        j += 1
+                    if j < n and tokens[j][:1].isalnum():
+                        bigram_key = f"{tok} {tokens[j]}".lower()
+                        repl = self.bigrams.get(bigram_key)
+                        if repl is not None:
+                            out.append(repl)
+                            hits += 1
+                            i = j + 1
+                            continue
+                repl = self.unigrams.get(tok.lower())
+                if repl is not None:
+                    out.append(repl)
+                    hits += 1
+                    i += 1
+                    continue
+            out.append(tok)
+            i += 1
+        return "".join(out), hits
+
+
+class _ColonLabelLayer:
+    """Matches a word/bigram token ONLY when immediately followed by ':' (optional
+    whitespace in between) and replaces the whole "Label:" span with "NL:" —
+    distinct from `_DictLayer` because it must not fire without the colon, and
+    must consume the colon token so it isn't duplicated."""
+
+    __slots__ = ("unigrams", "bigrams", "size")
+
+    def __init__(self, pairs: dict[str, str]):
+        # pairs: DE label -> NL label (no trailing colon)
+        self.unigrams: dict[str, str] = {}
+        self.bigrams: dict[str, str] = {}
+        for de, nl in pairs.items():
+            key = de.strip().lower()
+            if not key:
+                continue
+            if " " in key:
+                self.bigrams[key] = nl
+            else:
+                self.unigrams[key] = nl
+        self.size = len(self.unigrams) + len(self.bigrams)
+
+    def apply(self, text: str) -> tuple[str, int]:
+        if not text or self.size == 0:
+            return text, 0
+        tokens = _TOKEN_RE.findall(text)
+        n = len(tokens)
+        out: list[str] = []
+        hits = 0
+        i = 0
+        while i < n:
+            tok = tokens[i]
+            repl = None
+            colon_idx = None
+            if tok[:1].isalnum():
+                if self.bigrams:
+                    j = i + 1
+                    if j < n and tokens[j].isspace():
+                        j += 1
+                    if j < n and tokens[j][:1].isalnum():
+                        bigram_repl = self.bigrams.get(f"{tok} {tokens[j]}".lower())
+                        if bigram_repl is not None:
+                            k = j + 1
+                            if k < n and tokens[k].isspace():
+                                k += 1
+                            if k < n and tokens[k][:1] == ":":
+                                repl, colon_idx = bigram_repl, k
+                if repl is None:
+                    uni_repl = self.unigrams.get(tok.lower())
+                    if uni_repl is not None:
+                        k = i + 1
+                        if k < n and tokens[k].isspace():
+                            k += 1
+                        if k < n and tokens[k][:1] == ":":
+                            repl, colon_idx = uni_repl, k
+            if repl is not None:
+                tail = tokens[colon_idx][1:]  # anything after the colon in that punctuation run
+                out.append(f"{repl}:{tail}")
+                hits += 1
+                i = colon_idx + 1
+                continue
+            out.append(tok)
+            i += 1
+        return "".join(out), hits
+
 
 def _build_phrase_entries() -> list[tuple[re.Pattern, object]]:
     return [(re.compile(pat, re.IGNORECASE), repl) for pat, repl in _PHRASES]
 
 
-def _build_entries() -> list[tuple[re.Pattern, object]]:
-    entries: list[tuple[re.Pattern, object]] = []
-
-    # 1. phrases
-    entries.extend(_build_phrase_entries())
-
-    # 2a. colon labels — "Bezug:" → "Bekleding:" (must precede standalone form)
-    for de, nl in sorted(_LABELS.items(), key=lambda kv: -len(kv[0])):
-        entries.append((re.compile(rf"\b{re.escape(de)}\s*:", re.IGNORECASE), f"{nl}:"))
-
-    # 2b. standalone labels — "Bezug" → "bekleding" (lowercase, no colon)
-    for de, nl in sorted(_LABELS.items(), key=lambda kv: -len(kv[0])):
-        entries.append((re.compile(rf"\b{re.escape(de)}\b", re.IGNORECASE), nl.lower()))
-
-    # 3. product types (longest first so "Eck-Wandregal" beats "Wandregal").
-    #    Rendered lowercase (canonical) — casing is column-dependent, so the
-    #    name engine title-cases the `name` column while other columns stay
-    #    lowercase. This keeps "Milchglas → melkglas" (material) and
-    #    "Singleküche → mini keuken → Mini keuken" (name) both correct.
-    for de, nl in sorted(_PRODUCT_TYPES.items(), key=lambda kv: -len(kv[0])):
-        entries.append((re.compile(rf"\b{re.escape(de)}\b", re.IGNORECASE), nl))
-
-    # 4. misc / colors / materials / function words.
-    #    Colors & materials are fixed-case (lowercase / IJzer); misc & function
-    #    keep their canonical case as written.
-    fixed_case = {**_COLORS, **_MATERIALS}
-    case_special = {**_MISC, **_FUNCTION}
-    combined = sorted(
-        list(fixed_case.items()) + list(case_special.items()),
-        key=lambda kv: -len(kv[0]),
-    )
-    for de, nl in combined:
-        entries.append((re.compile(rf"\b{re.escape(de)}\b", re.IGNORECASE), nl))
-
-    return entries
+def _load_official_glossary() -> tuple[dict[str, str], dict[str, str]]:
+    """Return (colon_labels, general_terms) sourced from the imported official
+    glossary. Product+model rows never land in the glossary table — the
+    importer routes those straight into translation_memory for AdaptiveTM's
+    pattern extraction — so a simple colon-suffix split is sufficient here."""
+    labels: dict[str, str] = {}
+    general: dict[str, str] = {}
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT source_term, target_term FROM glossary "
+                "WHERE active=1 AND source_type='OFFICIAL_GLOSSARY' AND target_language='nl'"
+            ).fetchall()
+    except Exception:
+        return labels, general
+    for row in rows:
+        src = (row["source_term"] or "").strip()
+        tgt = (row["target_term"] or "").strip()
+        if not src or not tgt:
+            continue
+        if src.endswith(":"):
+            labels[src[:-1].strip()] = tgt[:-1].strip() if tgt.endswith(":") else tgt
+        else:
+            general[src] = tgt
+    return labels, general
 
 
 # Critical German tokens that must NEVER survive to export. Used by the
@@ -379,12 +512,39 @@ class Home24TerminologyBrain:
     """Deterministic DE→NL terminology engine."""
 
     def __init__(self):
-        self._entries = _build_entries()
         self._phrase_entries = _build_phrase_entries()
+        self._db_labels, self._db_general = _load_official_glossary()
+        self._rebuild_layers()
 
     # product-type head-noun map (DE → NL, lowercase nl) for the name engine
     # and adaptive TM pattern extraction.
     PRODUCT_TYPE_MAP = {**_PRODUCT_TYPES}
+
+    def _rebuild_layers(self):
+        # Colon-label layer: hardcoded + official glossary (glossary wins on
+        # collision — later dict in the merge takes precedence).
+        label_pairs = {**_LABELS, **self._db_labels}
+        self._label_colon = _ColonLabelLayer(label_pairs)
+        self._label_standalone = _DictLayer({de: nl.lower() for de, nl in label_pairs.items()})
+        # Product types stay curated-only — case-matching/name-engine head-noun
+        # lookup depends on this staying a small, deliberately-chosen set.
+        self._product_types = _DictLayer(_PRODUCT_TYPES)
+        # Misc/colors/materials/function + official general vocabulary — the
+        # bulk of the glossary lands here. Official entries win on collision.
+        self._misc = _DictLayer(_COLORS, _MATERIALS, _MISC, _FUNCTION, self._db_general)
+        # Kept for external callers (settings/QA pages) that inspect rule count.
+        self._entries = (
+            list(label_pairs.items())
+            + list(_PRODUCT_TYPES.items())
+            + list(_COLORS.items()) + list(_MATERIALS.items())
+            + list(_MISC.items()) + list(_FUNCTION.items())
+            + list(self._db_general.items())
+        )
+
+    def reload(self):
+        """Reload official-glossary entries from the DB (call after an import)."""
+        self._db_labels, self._db_general = _load_official_glossary()
+        self._rebuild_layers()
 
     def apply(self, text: str) -> tuple[str, int]:
         """Apply all terminology rules. Returns (text, replacement_count)."""
@@ -392,9 +552,17 @@ class Home24TerminologyBrain:
             return text, 0
         result = text
         hits = 0
-        for pat, repl in self._entries:
+        for pat, repl in self._phrase_entries:
             result, n = pat.subn(repl, result)
             hits += n
+        result, n = self._label_colon.apply(result)
+        hits += n
+        result, n = self._label_standalone.apply(result)
+        hits += n
+        result, n = self._product_types.apply(result)
+        hits += n
+        result, n = self._misc.apply(result)
+        hits += n
         result = self._normalize_style(result)
         return result, hits
 
@@ -415,8 +583,10 @@ class Home24TerminologyBrain:
         # Color/material combinations use a slash without surrounding spaces:
         # "melkglas / IJzer" → "melkglas/IJzer".
         text = re.sub(r"\s+/\s+", "/", text)
-        # IJ capitalization fix.
-        text = re.sub(r"\bIjzer\b", "IJzer", text)
+        # IJ capitalization fix — Dutch always capitalizes the IJ digraph at a
+        # word start, regardless of which layer (hardcoded or DB glossary)
+        # produced the lowercase/mixed-case form.
+        text = re.sub(r"\bijzer\b", "IJzer", text, flags=re.IGNORECASE)
         # Collapse accidental double spaces (but keep <br> intact).
         text = re.sub(r"[ \t]{2,}", " ", text)
         return text.strip()

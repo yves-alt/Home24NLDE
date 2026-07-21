@@ -1,9 +1,13 @@
 import streamlit as st
-from engines.qa_engine import get_qa_engine
 from engines.nl.product_name_engine import get_product_name_engine
 from engines.nl.residue_gate import get_residue_gate
 from engines.nl.terminology import get_terminology
 from auth.session import require_permission
+
+_TEST_COLUMNS = [
+    "qualityDetail", "name", "materialDetail", "colorDetail", "deliveryScope",
+    "otherMeasurements", "variantName", "textileComposition", "warningsAndSafetyInformation",
+]
 
 
 def render():
@@ -14,33 +18,39 @@ def render():
     tab1, tab2, tab3, tab4 = st.tabs(["QA Validator", "Name Engine", "Residue Gate", "Terminology"])
 
     with tab1:
-        st.markdown("Test the Dutch QA engine on any translation.")
+        st.markdown("Run a translation through the **real quality gate** — the same checks that "
+                    "block export (German residue, model-name loss, information loss, name rules, "
+                    "metadata leaks, `<br>` corruption).")
         col1, col2 = st.columns(2)
         with col1:
             source = st.text_area("German source", height=100, placeholder="Duschmatte")
         with col2:
             translation = st.text_area("Dutch translation (to validate)", height=100, placeholder="Douchematt")
+        column = st.selectbox("Column profile", _TEST_COLUMNS)
 
         if st.button("Validate", type="primary"):
-            qa = get_qa_engine()
-            result = qa.validate(translation, source)
+            from engines.nl.model_protector import get_model_protector
+            from engines.nl.quality_gate import get_quality_gate
+            from engines.nl.types import CellResult
 
-            if result.issues:
-                st.markdown(f"**{len(result.issues)} issue(s) found:**")
-                for issue in result.issues:
-                    severity = "warning" if issue.auto_fixable else "error"
-                    icon = "✓" if issue.auto_fixable else "✗"
+            model_names = get_model_protector().protect(source).model_names if source else []
+            cell = CellResult(
+                row=1, column=column, source=source, target=translation,
+                origin="HUMAN", confidence=1.0, confidence_label="TEST", model_names=model_names,
+            )
+            issues = get_quality_gate().check_cell(cell)
+
+            if issues:
+                st.markdown(f"**{len(issues)} issue(s) found — would block export:**")
+                for issue in issues:
+                    fix = f"<br>Suggested fix: <code>{issue.proposed_fix}</code>" if issue.proposed_fix else ""
                     st.markdown(
-                        f'<div class="alert-{"success" if issue.auto_fixable else "warning"}">'
-                        f'<strong>[{issue.issue_type}]</strong> '
-                        f'<code>{issue.original}</code> → <code>{issue.suggestion or "(flag only)"}</code> '
-                        f'{"(auto-fixed)" if issue.auto_fixable else "(manual review)"}</div>',
+                        f'<div class="alert-warning"><strong>{issue.issue}</strong>{fix}</div>',
                         unsafe_allow_html=True,
                     )
-                st.markdown(f"**Corrected:** `{result.corrected}`")
             else:
                 st.markdown(
-                    '<div class="alert-success">No QA issues found. Translation looks clean.</div>',
+                    '<div class="alert-success">No QA issues found — this would pass the real export gate.</div>',
                     unsafe_allow_html=True,
                 )
 

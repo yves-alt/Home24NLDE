@@ -67,7 +67,8 @@ class AdaptiveTranslationMemoryEngine:
         with get_connection() as conn:
             rows = conn.execute(
                 "SELECT normalized_source, source_segment, target_segment "
-                "FROM translation_memory WHERE target_segment IS NOT NULL "
+                "FROM translation_memory "
+                "WHERE target_segment IS NOT NULL AND target_language='nl' "
                 "ORDER BY frequency DESC"
             ).fetchall()
         exact: dict[str, str] = {}

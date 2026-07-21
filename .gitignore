@@ -7,6 +7,9 @@ database/localization.db
 database/*.db
 database/*.db-wal
 database/*.db-shm
+tests/_test_localization.db
+tests/_test_localization.db-wal
+tests/_test_localization.db-shm
 
 # Generated exports and cache
 data/exports/

@@ -14,6 +14,8 @@ when a cell needs GPT and GPT is unavailable or fails, the cell keeps its best
 deterministic form and is flagged so the quality gate blocks export.
 """
 
+from dataclasses import dataclass, field
+
 from engines.nl.terminology import get_terminology
 from engines.nl.model_protector import get_model_protector
 from engines.nl.adaptive_tm import get_adaptive_tm, TMKind, normalize
@@ -47,10 +49,28 @@ COLUMN_RULES: dict[str, str] = {
     "warningsAndSafetyInformation": "Translate safety/warning text fully and naturally.",
 }
 
+# Fallback for columns outside COLUMN_RULES (Section 8's GENERIC_HOME24_DESCRIPTION_NL
+# profile) — e.g. careInstructions, assemblyInformation: columns the classifier found
+# to be German descriptive prose but that have no dedicated profile. Full info
+# preservation and glossary compliance, no 40-char/name-compression behavior (that
+# stays gated on column == "name" elsewhere in this file).
+GENERIC_COLUMN_RULE = (
+    "General Home24 product copy. Natural, professional Dutch e-commerce tone. "
+    "Preserve all information — do not shorten or compress."
+)
+
 # Origins that count as deterministic (no GPT spend).
 DETERMINISTIC_ORIGINS = {"HUMAN", "GLOSSARY", "TM_EXACT", "TM_ADAPTED", "TERMINOLOGY", "EMPTY"}
 
 _MAX_CORRECTION_PASSES = 3
+_MAX_GLOSSARY_HINTS = 8
+
+
+@dataclass
+class SelfCorrectStats:
+    passes_run: int = 0
+    cells_fixed: int = 0
+    gpt_retries: int = 0
 
 
 class DutchLocalizationEngine:
@@ -86,7 +106,7 @@ class DutchLocalizationEngine:
             with get_connection() as conn:
                 row = conn.execute(
                     "SELECT target_term, source_type, confidence FROM glossary "
-                    "WHERE active=1 AND source_term=? "
+                    "WHERE active=1 AND source_term=? AND target_language='nl' "
                     "ORDER BY (source_type='HUMAN_REVIEW') DESC, confidence DESC LIMIT 1",
                     (key,),
                 ).fetchone()
@@ -101,6 +121,33 @@ class DutchLocalizationEngine:
 
     def clear_glossary_cache(self):
         self._glossary_cache.clear()
+
+    # ── GPT prompt assembly ────────────────────────────────────────────────
+
+    def _gpt_column_rule(self, column: str, text: str) -> str:
+        """Column rule text plus any official-glossary terms that literally
+        appear in this segment, so GPT is steered toward the approved Dutch
+        term instead of guessing a synonym (Section 9's per-batch glossary
+        injection — scoped to what's already loaded in the terminology brain,
+        no extra DB round-trip per cell)."""
+        rule = COLUMN_RULES.get(column, GENERIC_COLUMN_RULE)
+        text_low = text.lower()
+        hints = []
+        for de, nl in self._term._db_general.items():
+            if de.lower() in text_low:
+                hints.append((de, nl))
+                if len(hints) >= _MAX_GLOSSARY_HINTS:
+                    break
+        if len(hints) < _MAX_GLOSSARY_HINTS:
+            for de, nl in self._term._db_labels.items():
+                if de.lower() in text_low:
+                    hints.append((de, nl))
+                    if len(hints) >= _MAX_GLOSSARY_HINTS:
+                        break
+        if hints:
+            joined = "; ".join(f'"{de}" -> "{nl}"' for de, nl in hints)
+            rule = f"{rule}\nUse these exact approved Dutch terms: {joined}."
+        return rule
 
     # ── segment translation ──────────────────────────────────────────────
 
@@ -136,7 +183,7 @@ class DutchLocalizationEngine:
         # 4. German remains → controlled GPT (models masked).
         if self.gpt_active:
             prot = self._protector.protect(text)
-            res = self._gpt.translate(prot.text, column, COLUMN_RULES.get(column, ""))
+            res = self._gpt.translate(prot.text, column, self._gpt_column_rule(column, text))
             if res.ok and res.text:
                 restored = self._protector.restore(res.text, prot.mapping)
                 enforced, _ = self._term.apply(restored)
@@ -225,13 +272,15 @@ class DutchLocalizationEngine:
 
     # ── multi-pass self-correction (PART 7) ──────────────────────────────
 
-    def self_correct(self, cells: list[CellResult]) -> list[CellResult]:
+    def self_correct(self, cells: list[CellResult]) -> tuple[list[CellResult], SelfCorrectStats]:
         """Iterative gate→fix loop. Only failing cells are retried each pass.
 
         Pass 1–3: residue + terminology + info-preservation fix cycles.
         Pass 4 (optional): Dutch naturalness refinement for GPT-translated cells.
         """
+        stats = SelfCorrectStats()
         for _ in range(_MAX_CORRECTION_PASSES):
+            stats.passes_run += 1
             report = self._gate.evaluate(cells)
             if report.passed:
                 break
@@ -239,8 +288,9 @@ class DutchLocalizationEngine:
             changed = False
             for cell in cells:
                 if (cell.row, cell.column) in failing:
-                    if self._fix_cell(cell):
+                    if self._fix_cell(cell, stats):
                         changed = True
+                        stats.cells_fixed += 1
             if not changed:
                 break
 
@@ -254,9 +304,9 @@ class DutchLocalizationEngine:
                     if changed:
                         cell.target = refined
 
-        return cells
+        return cells, stats
 
-    def _fix_cell(self, cell: CellResult) -> bool:
+    def _fix_cell(self, cell: CellResult, stats: SelfCorrectStats | None = None) -> bool:
         """Fix a single failing cell in-place. Returns True if anything changed."""
         before = cell.target
 
@@ -278,9 +328,11 @@ class DutchLocalizationEngine:
         still_dirty = bool(self._residue.scan(cell.target))
         info_lost = not self._info.validate(cell.source, cell.target, cell.model_names).ok
         if (still_dirty or info_lost) and self.gpt_active:
+            if stats is not None:
+                stats.gpt_retries += 1
             prot = self._protector.protect(cell.source)
             gpt_res = self._gpt.translate(
-                prot.text, cell.column, COLUMN_RULES.get(cell.column, "")
+                prot.text, cell.column, self._gpt_column_rule(cell.column, cell.source)
             )
             if gpt_res.ok and gpt_res.text:
                 restored = self._protector.restore(gpt_res.text, prot.mapping)

@@ -47,6 +47,33 @@ def _build_vocab() -> set[str]:
 
 _VOCAB = _build_vocab()
 
+
+def _load_glossary_product_types() -> set[str]:
+    """Product-type nouns discovered from the official glossary's imported
+    "ProductType ModelName" pairs (the first word of each 2-word TM source
+    segment). Without this, a product type outside the small hardcoded
+    _PRODUCT_TYPES dict — e.g. "Klapptisch", which only exists via the
+    imported glossary — looks like an unknown capitalized word and gets
+    merged into the model-name placeholder run alongside the real model name
+    (producing a false "model name lost" quality-gate failure once the
+    product type is correctly translated and the model name isn't)."""
+    try:
+        from database.database import get_connection
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT source_segment FROM translation_memory "
+                "WHERE created_by='OFFICIAL_GLOSSARY'"
+            ).fetchall()
+    except Exception:
+        return set()
+    extra: set[str] = set()
+    for r in rows:
+        words = (r["source_segment"] or "").split()
+        if len(words) == 2:
+            extra.add(words[0].lower())
+    return extra
+
+
 _PLACEHOLDER = "⟦M{}⟧"
 _PLACEHOLDER_RE = re.compile(r"⟦M\d+⟧")
 
@@ -67,11 +94,19 @@ class ProtectedText:
 
 class ModelNameProtector:
 
+    def __init__(self):
+        self._vocab = set(_VOCAB) | _load_glossary_product_types()
+
+    def reload(self):
+        """Refresh the glossary-sourced part of the vocabulary (call after a
+        glossary import)."""
+        self._vocab = set(_VOCAB) | _load_glossary_product_types()
+
     def _is_model_token(self, tok: str, aggressive: bool) -> bool:
         low = tok.lower()
         if low in CURATED_MODELS:
             return True
-        if low in _VOCAB:
+        if low in self._vocab:
             return False
         if tok.isdigit():
             return False

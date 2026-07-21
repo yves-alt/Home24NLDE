@@ -105,7 +105,24 @@ CREATE TABLE IF NOT EXISTS consistency_log (
 """
 
 
+# Columns added after initial release — SQLite has no "ADD COLUMN IF NOT EXISTS",
+# so each is applied only if missing (safe to run on every startup).
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, ddl_suffix)
+    ("translation_memory", "target_language", "TEXT DEFAULT 'nl'"),
+    ("glossary", "target_language", "TEXT DEFAULT 'nl'"),
+]
+
+
+def _apply_added_columns(conn):
+    for table, column, ddl in _ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def run_migrations():
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        _apply_added_columns(conn)
     return True
