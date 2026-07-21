@@ -17,6 +17,9 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
+from engines.nl.terminology import GERMAN_MARKERS
+from engines.nl.model_protector import CURATED_MODELS
+
 _NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
 # Appliance abbreviations whose NL expansion must appear if the abbrev was present in source.
 _ABBREV_REQUIRED = {
@@ -101,6 +104,49 @@ class InformationPreservationValidator:
                 issues.append("dimension label 'B x H x T' not converted to 'B x H x D'")
 
         return PreservationReport(issues)
+
+    # ── identical-output classification (PART 2 §18) ────────────────────
+
+    def classify_identical(self, source: str, target: str, model_names=()) -> str | None:
+        """Return 'VALID_IDENTICAL' / 'SUSPICIOUS_IDENTICAL' / None (not
+        identical). A German source surviving unchanged isn't always wrong —
+        it may be a model name, brand, code, or a term the glossary itself
+        maps to the same spelling."""
+        src = (source or "").strip()
+        tgt = (target or "").strip()
+        if not src or not tgt or src != tgt:
+            return None
+        words = src.split()
+        if len(words) <= 1:
+            return "VALID_IDENTICAL"
+        if src in model_names or src.lower() in CURATED_MODELS:
+            return "VALID_IDENTICAL"
+        if GERMAN_MARKERS.search(src):
+            return "SUSPICIOUS_IDENTICAL"
+        # Multi-word but no German-only marker found — likely a legitimate
+        # shared term (e.g. an international product name); not flagged.
+        return "VALID_IDENTICAL"
+
+    # ── too-short translation detection (PART 2 §19) ────────────────────
+
+    def looks_too_short(self, source: str, target: str, model_names=()) -> bool:
+        """Flag a translation as suspiciously short when the length ratio is
+        low AND an entity-preservation signal fired (numbers/colors/models/
+        abbreviations dropped) — German compounds legitimately shrink in
+        Dutch, so ratio alone would false-positive constantly. Below an
+        extreme ratio, flag regardless: even a compact Dutch compound rarely
+        drops below ~15% of a substantive German source's length, so this
+        catches material/descriptive-only loss the entity checks can't see
+        (materials are deliberately not enforced there — see module docstring)."""
+        src, tgt = (source or "").strip(), (target or "").strip()
+        if not src or not tgt or len(src) < 8:
+            return False
+        ratio = len(tgt) / max(len(src), 1)
+        if ratio < 0.15:
+            return True
+        if ratio >= 0.4:
+            return False
+        return bool(self.validate(src, tgt, model_names).issues)
 
 
 _instance: InformationPreservationValidator | None = None

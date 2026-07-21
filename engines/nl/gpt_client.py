@@ -146,6 +146,25 @@ class NLGptClient:
         result = self._verify_placeholders(source, result)
         return result
 
+    def compress_name(self, masked_translation: str, max_length: int, source: str = "") -> GptResult:
+        """Compress an existing (placeholder-masked) Dutch product name to fit
+        `max_length` characters. Last-resort candidate for the name engine —
+        only called when deterministic compression found nothing valid."""
+        system = _SYSTEM_PROMPT + (
+            f"\n\nYou are compressing an EXISTING Dutch Home24 product name to fit a "
+            f"strict character limit of {max_length} characters. Copy every ⟦M…⟧ "
+            "placeholder exactly. Never truncate mid-word or mid-placeholder. Never end "
+            "on a connector (met/van/voor/en/+/&/-/, or a trailing comma/colon/bracket). "
+            "Preserve the product type. Remove secondary accessories or descriptive "
+            "words first — never invent information. Return only the product name, "
+            "nothing else."
+        )
+        user = f"Compress to at most {max_length} characters:\n{masked_translation}"
+        if source:
+            user += f"\n\n(German source, context only — do not translate again): {source}"
+        result = self._chat(system, user, max_tokens=60)
+        return self._verify_placeholders(masked_translation, result)
+
     def refine(self, dutch: str, instruction: str) -> GptResult:
         """Rewrite an existing Dutch segment per `instruction`, preserving data."""
         system = _SYSTEM_PROMPT + (

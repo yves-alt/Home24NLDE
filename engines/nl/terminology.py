@@ -63,8 +63,8 @@ _PHRASES: list[tuple[str, str]] = [
     (r"\bohne\s+Dekoration\b", "zonder decoratie"),
     (r"\bmit\s+Dekoration\b", "met decoratie"),
     (r"\bKombi\s+aus\b", "combinatie van"),
-    (r"\binkl(?:usive)?\s+Montage\b", "incl. montage"),
-    (r"\bexkl(?:usive)?\s+Montage\b", "excl. montage"),
+    (r"\binkl(?:usive|\.)?\s+Montage\b", "incl. montage"),
+    (r"\bexkl(?:usive|\.)?\s+Montage\b", "excl. montage"),
     (r"\bPflegeleicht\s+und\s+wetterfest\b", "onderhoudsvriendelijk en weerbestendig"),
     (r"\bPflegeleicht\s+und\s+strapazierfähig\b", "onderhoudsvriendelijk en slijtvast"),
     (r"\bMaße\s*\(\s*B\s*[xX]\s*H\s*[xX]\s*T\s*\)", "afmetingen (B x H x D)"),
@@ -587,6 +587,12 @@ class Home24TerminologyBrain:
         # word start, regardless of which layer (hardcoded or DB glossary)
         # produced the lowercase/mixed-case form.
         text = re.sub(r"\bijzer\b", "IJzer", text, flags=re.IGNORECASE)
+        # Collapse accidental double periods — e.g. "inkl." (source abbreviation,
+        # trailing "." kept as its own token) replaced with "incl." (a value
+        # that already ends in ".") produces "incl..": a dict-layer token
+        # replacement can't know the source token it's replacing was itself
+        # followed by an abbreviation-period. Never occurs in genuine Dutch text.
+        text = re.sub(r"\.\.+", ".", text)
         # Collapse accidental double spaces (but keep <br> intact).
         text = re.sub(r"[ \t]{2,}", " ", text)
         return text.strip()

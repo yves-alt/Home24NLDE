@@ -16,7 +16,11 @@ _EXTRA_RESIDUE = re.compile(
     r"\b(?:\d+\s*-?\s*flammig|Kombi\s+aus|Stk\.?|Stück|ca\."
     r"|Pflegeleicht|platzsparend|multifunktional|hochwertig|gemütlich"
     r"|Wohnzimmer|Schlafzimmer|Esszimmer|Kinderzimmer|Badezimmer"
-    r"|Stauraum|Lieferung|Verpackung|Montage(?!\s*-?handle)"
+    r"|Stauraum|Lieferung|Verpackung"
+    # "montage" is valid Dutch too — only flag it unless it's the approved
+    # "incl./excl. montage" phrase terminology.py's own _PHRASES produces, or
+    # a "-handleiding" compound (montagehandleiding).
+    r"|(?<!incl\. )(?<!excl\. )Montage(?!\s*-?handle)"
     r"|bestehend\s+aus|in\s+verschiedenen\s+(?:Farben|Größen)"
     r"|erhältlich|geliefert|enthalten|zzgl|MwSt)\b",
     re.IGNORECASE,

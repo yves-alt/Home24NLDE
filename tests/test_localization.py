@@ -286,3 +286,68 @@ def test_csv_export_columns_and_exclude_name():
     reader = csv.DictReader(io.StringIO(no_name))
     assert "name" not in reader.fieldnames
     assert "colorDetail" in reader.fieldnames
+
+
+# ── realistic multi-category fixtures (PART 2 §27) ─────────────────────────
+# Deterministic-only (no glossary import needed) — covers bed, wardrobe, sofa,
+# lighting, kitchen, table, chair, bathroom, delivery scope, textile
+# composition, using vocabulary already in terminology.py / seed_glossary.py.
+
+CATEGORY_CASES = [
+    ("name", "Bett Nordic 180 cm", "Bed Nordic 180 cm"),                       # bed
+    ("name", "Kleiderschrank Levin", "Kledingkast Levin"),                     # wardrobe
+    ("colorDetail", "Bezug: grau<br>Füße: schwarz", "Bekleding: grijs<br>Poten: zwart"),  # sofa detail
+    ("name", "Deckenleuchte Banyo", "Plafondlamp Banyo"),                      # lighting
+    ("name", "Singleküche Ingrid 150 cm mit Mikrowelle", "Mini keuken Ingrid 150 cm met magnetron"),  # kitchen
+    ("name", "Couchtisch Halburn", "Salontafel Halburn"),                      # table
+    ("name", "Sessel Nora", "Fauteuil Nora"),                                  # chair
+    ("deliveryScope", "inkl. Montage", "incl. montage"),                       # delivery scope
+    ("materialDetail", "Baumwolle", "katoen"),                                 # textile composition
+    ("materialDetail", "Massivholz", "massief hout"),
+]
+
+
+@pytest.mark.parametrize("column,source,expected", CATEGORY_CASES)
+def test_realistic_category_fixtures(engine, column, source, expected):
+    result = engine.translate_cell(1, column, source)
+    assert result.target == expected
+    assert get_residue_gate().scan(result.target) == []
+
+
+# ── false-positive residue guard: DE/NL lexically-similar cognates ────────
+
+@pytest.mark.parametrize("dutch_text", [
+    "de kast in de kamer",
+    "een tafel met een bank",
+    "die stoel is met een deken",
+])
+def test_common_dutch_words_never_flagged_as_residue(dutch_text):
+    t = get_terminology()
+    # These words are deliberately shared with German (die/in/een/met) and
+    # must not trigger the residue gate on genuinely Dutch output.
+    assert t.remaining_german(dutch_text) == []
+    assert get_residue_gate().scan(dutch_text) == []
+
+
+# ── repeated product family, different model names (TM pattern safety) ────
+
+def test_tm_pattern_generalizes_across_family_without_model_contamination(engine):
+    from database.database import get_connection
+    from datetime import datetime
+
+    now = datetime.now().isoformat()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO translation_memory (source_segment, target_segment, normalized_source, "
+            "normalized_target, frequency, created_at, modified_at, created_by) "
+            "VALUES (?,?,?,?,100,?,?,'TEST')",
+            ("Wandleuchte Consuma", "Wandlamp Consuma", "wandleuchte consuma", "wandlamp consuma", now, now),
+        )
+    get_adaptive_tm().reload()
+
+    same = engine.translate_cell(1, "name", "Wandleuchte Consuma")
+    assert same.target == "Wandlamp Consuma"
+
+    different_model = engine.translate_cell(2, "name", "Wandleuchte Zebay")
+    assert "Zebay" in different_model.target
+    assert "Consuma" not in different_model.target  # must not copy the wrong model

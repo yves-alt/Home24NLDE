@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS consistency_log (
     alternatives    TEXT,
     logged_at       TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS glossary_validation_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename        TEXT,
+    source_term     TEXT,
+    expected_target TEXT,
+    actual_output   TEXT,
+    logged_at       TEXT DEFAULT (datetime('now'))
+);
 """
 
 

@@ -173,6 +173,31 @@ class ModelNameProtector:
 
         return ProtectedText("".join(out), mapping)
 
+    def protect_name(self, text: str) -> ProtectedText:
+        """Name-column-specific masking. Home24 names follow "ProductType
+        Model [connector accessories...]" — the model name lives in the head,
+        before the first connector. Forcing aggressive mode over the WHOLE
+        string (needed so a model isn't missed just because a long list of
+        accessories pushes the segment past the short-segment word-count
+        cutoff) would also sweep up ordinary German nouns in later
+        accessory/material clauses as fake "models", leaving them permanently
+        untranslated. So: aggressive only in the head; conservative
+        (vocab-aware) for the rest."""
+        m = re.search(r"\b(mit|met|und|en|aus|von|inkl\.|incl\.)\b|[+&,]", text)
+        if not m:
+            return self.protect(text, aggressive=True)
+        split_at = m.end()
+        head, tail = text[:split_at], text[split_at:]
+        head_p = self.protect(head, aggressive=True)
+        tail_p = self.protect(tail, aggressive=False)
+        merged_mapping = dict(head_p.mapping)
+        tail_text = tail_p.text
+        for i, (ph, original) in enumerate(tail_p.mapping.items(), start=1):
+            new_ph = _PLACEHOLDER.format(len(head_p.mapping) + i)
+            tail_text = tail_text.replace(ph, new_ph)
+            merged_mapping[new_ph] = original
+        return ProtectedText(head_p.text + tail_text, merged_mapping)
+
     def restore(self, text: str, mapping: dict[str, str]) -> str:
         for ph, original in mapping.items():
             text = text.replace(ph, original)

@@ -102,17 +102,30 @@ def export_workbook(
     return str(output_path)
 
 
+# PART 2 §21 review highlighting — yellow for warning, red for critical, light
+# blue for informational (non-blocking) events.
+_SEVERITY_FILLS = {
+    "CRITICAL": PatternFill(start_color="FFCDD2", end_color="FFCDD2", fill_type="solid"),
+    "WARNING": PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid"),
+    "INFO": PatternFill(start_color="E1F5FE", end_color="E1F5FE", fill_type="solid"),
+}
+
+
 def export_workbook_translated_bytes(
     original_bytes: bytes,
     translation_map: dict,
     headers: list,
     sheet_name: str = "Tabelle1",
+    severity_map: dict | None = None,
 ) -> bytes:
     """Return translated Excel as bytes.
 
     Modifies sheet_name in-place on a copy of the original workbook.
     translation_map: {row_idx (0-based data row): {col_name: dutch_value}}
     headers: ordered list of column names from row 1 of sheet_name.
+    severity_map: optional {(1-based data row, col_name): "CRITICAL"|"WARNING"|"INFO"}
+      for review highlighting — does not touch cells outside this map, so
+      original formatting on unaffected cells is left alone.
     """
     wb = openpyxl.load_workbook(io.BytesIO(original_bytes), data_only=True)
 
@@ -123,13 +136,18 @@ def export_workbook_translated_bytes(
 
     # Build header → 1-based column index map
     col_map = {h: idx + 1 for idx, h in enumerate(headers) if h}
+    severity_map = severity_map or {}
 
     for row_idx, col_translations in translation_map.items():
         # row_idx is 0-based data row; Excel row = +2 (1-based + header)
         xl_row = row_idx + 2
         for col_name, dutch_value in col_translations.items():
             if col_name in col_map:
-                ws.cell(row=xl_row, column=col_map[col_name], value=dutch_value)
+                cell = ws.cell(row=xl_row, column=col_map[col_name], value=dutch_value)
+                severity = severity_map.get((row_idx + 1, col_name))
+                fill = _SEVERITY_FILLS.get(severity)
+                if fill:
+                    cell.fill = fill
 
     buf = io.BytesIO()
     wb.save(buf)

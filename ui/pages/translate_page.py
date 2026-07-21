@@ -131,7 +131,7 @@ _STATE_KEYS = [
     "t_step", "t_filename", "t_file_bytes", "t_cells", "t_original_targets",
     "t_xl_bytes", "t_csv_bytes", "t_stats", "t_headers", "t_data_rows",
     "t_version", "t_detected_sheet", "t_detection_scored", "t_plan",
-    "t_coverage", "t_gate", "t_pass_summary",
+    "t_coverage", "t_gate", "t_pass_summary", "t_reconciliation",
 ]
 
 
@@ -294,6 +294,7 @@ def _run_translation(file_bytes, filename, sheet_name, scored, raw_headers, data
 
     from engines.nl.localization_engine import get_localization_engine
     from engines.nl.consistency_engine import harmonize
+    from engines.nl.glossary_validator import validate_cells as validate_glossary_compliance
     engine = get_localization_engine(use_gpt=True)
     engine.clear_glossary_cache()
 
@@ -318,14 +319,21 @@ def _run_translation(file_bytes, filename, sheet_name, scored, raw_headers, data
         progress.progress(1.0)
         status.text("Pass 2 — Self-correction…")
         cells, correct_stats = engine.self_correct(cells)
-        status.text("Pass 3 — Consistency harmonization…")
+        status.text("Pass 3 — Glossary compliance validation…")
+        glossary_stats = validate_glossary_compliance(cells, filename=filename)
+        status.text("Pass 4 — Consistency harmonization…")
         consistency_report = harmonize(cells, filename=filename)
 
-    coverage = _build_coverage(cells, plan)
+    coverage, reconciliation = _build_coverage(cells, plan, data_rows)
     coverage_errors = [
         f"'{c['Column']}': {c['Translated']} translated, {c['Source cells']} expected"
         for c in coverage if not c["_ok"] and c["Source cells"] > 0
     ]
+    if not reconciliation["_reconciles"]:
+        coverage_errors.append(
+            f"Reconciliation mismatch: {reconciliation['Successful']} successful + "
+            f"{reconciliation['Failed']} failed exceeds {reconciliation['Expected translations']} expected"
+        )
     gate = engine.quality_report(cells, coverage_errors=coverage_errors)
 
     st.session_state.update({
@@ -334,28 +342,36 @@ def _run_translation(file_bytes, filename, sheet_name, scored, raw_headers, data
         "t_original_targets": {(c.row, c.column): c.target for c in cells},
         "t_stats": _build_stats(cells), "t_xl_bytes": None, "t_csv_bytes": None,
         "t_version": 0, "t_step": "preview", "t_detected_sheet": sheet_name,
-        "t_detection_scored": scored, "t_plan": plan, "t_coverage": coverage, "t_gate": gate,
-        "t_pass_summary": _build_pass_summary(total, correct_stats, consistency_report, gate),
+        "t_detection_scored": scored, "t_plan": plan, "t_coverage": coverage,
+        "t_reconciliation": reconciliation, "t_gate": gate,
+        "t_pass_summary": _build_pass_summary(total, correct_stats, glossary_stats, consistency_report, gate),
     })
     for k in [k for k in st.session_state if k.startswith("preview_editor_")]:
         del st.session_state[k]
     st.rerun()
 
 
-def _build_pass_summary(total_cells: int, correct_stats, consistency_report, gate) -> list:
+def _build_pass_summary(total_cells: int, correct_stats, glossary_stats, consistency_report, gate) -> list:
     return [
         f"Pass 1 — Initial Translation: completed ({total_cells} cell(s))",
         f"Pass 2 — Self-Correction: {correct_stats.cells_fixed} cell(s) fixed across "
         f"{correct_stats.passes_run} loop(s), {correct_stats.gpt_retries} GPT retr(y/ies)",
-        f"Pass 3 — Consistency Harmonization: {consistency_report.cells_harmonized} value(s) harmonized "
+        f"Pass 3 — Glossary Compliance: {glossary_stats['corrected']} correction(s), "
+        f"{glossary_stats['flagged']} flagged for review",
+        f"Pass 4 — Consistency Harmonization: {consistency_report.cells_harmonized} value(s) harmonized "
         f"across {len(consistency_report.rewrites)} recurring source(s)",
-        f"Pass 4 — Quality Gate: {'passed' if gate.passed else f'{gate.issue_count} issue(s)'}",
+        f"Pass 5 — Quality Gate: {gate.status.replace('_', ' ').title()} "
+        f"({len(gate.critical_issues)} critical, {len(gate.warning_issues)} warning)",
     ]
 
 
 # ── Coverage / stats ─────────────────────────────────────────────────────
 
-def _build_coverage(cells, plan) -> list[dict]:
+def _build_coverage(cells, plan, data_rows=None) -> tuple:
+    """Per-column coverage table, plus a full reconciliation summary (§22):
+    non-empty source cells, protected cells, expected/successful/failed/
+    review-required translations must add up — a mismatch is a CRITICAL gate
+    issue via coverage_errors, not a silently-accepted gap."""
     translated = Counter(c.column for c in cells if (c.target or "").strip())
     unchanged = Counter(c.column for c in cells if c.source == c.target)
     rows = []
@@ -368,7 +384,27 @@ def _build_coverage(cells, plan) -> list[dict]:
             "Coverage": f"{tr}/{expected}" if expected else "—",
             "_ok": tr >= expected,
         })
-    return rows
+
+    expected_total = plan.total_expected
+    failed = sum(1 for c in cells if c.gpt_failed)
+    review_required = sum(1 for c in cells if any("requires review" in w.lower() for w in c.warnings))
+    successful = sum(1 for c in cells if (c.target or "").strip() and not c.gpt_failed)
+    protected_cell_count = 0
+    if data_rows is not None:
+        protected_cell_count = sum(
+            1 for r in data_rows for col in plan.protected_cols
+            if r.get(col) is not None and str(r.get(col, "")).strip()
+        )
+    reconciliation = {
+        "Non-empty source cells": expected_total,
+        "Protected cells (untouched)": protected_cell_count,
+        "Expected translations": expected_total,
+        "Successful": successful,
+        "Failed": failed,
+        "Review required": review_required,
+        "_reconciles": successful + failed <= expected_total,
+    }
+    return rows, reconciliation
 
 
 def _build_stats(cells) -> dict:
@@ -393,7 +429,10 @@ def _render_preview():
     version = st.session_state.get("t_version") or 0
     detected_sheet = st.session_state.get("t_detected_sheet") or "—"
     coverage = st.session_state.get("t_coverage")
+    reconciliation = st.session_state.get("t_reconciliation")
     gate = st.session_state.get("t_gate")
+    plan = st.session_state.get("t_plan")
+    data_rows = st.session_state.get("t_data_rows") or []
 
     st.markdown(f"**File:** {filename} &nbsp;·&nbsp; **Sheet:** {detected_sheet}")
 
@@ -410,7 +449,16 @@ def _render_preview():
             for line in pass_summary:
                 st.text(line)
 
-    _render_gate(gate)
+    _render_gate(gate, cells, data_rows, plan)
+
+    if reconciliation:
+        with st.expander("Translation coverage reconciliation", expanded=not reconciliation.get("_reconciles", True)):
+            recon_df = pd.DataFrame(
+                [{"Metric": k, "Count": v} for k, v in reconciliation.items() if not k.startswith("_")]
+            )
+            st.dataframe(recon_df, use_container_width=True, hide_index=True)
+            if not reconciliation.get("_reconciles", True):
+                st.error("Reconciliation does not add up — see the coverage gap above. Export is blocked.")
 
     if coverage:
         has_gap = any(not r["_ok"] and r["Source cells"] > 0 for r in coverage)
@@ -465,23 +513,104 @@ def _render_preview():
     _render_download()
 
 
-def _render_gate(gate):
+def _categorize_issue(issue_text: str) -> str:
+    low = issue_text.lower()
+    if "name compression" in low or "name rule" in low:
+        return "Product names"
+    if "german residue" in low:
+        return "Residue"
+    if "glossary" in low:
+        return "Glossary"
+    if "information loss" in low or "model integrity" in low or "<br>" in low:
+        return "Information loss"
+    return "Other"
+
+
+def _row_context(row: int, data_rows: list, headers: list) -> dict:
+    if not data_rows or row - 1 >= len(data_rows) or row < 1:
+        return {}
+    data = data_rows[row - 1]
+    article = next((data.get(h) for h in headers if normalize_header(h) == "articlenumber"), None)
+    jira = next((data.get(h) for h in _jira_key_headers(headers)), None)
+    return {"articleNumber": article, "Jira Key": jira}
+
+
+def _render_gate(gate, cells=None, data_rows=None, plan=None):
     if not gate:
         return
-    if gate.passed:
-        st.success("Quality gate passed — no German residue, no lost data, no name violations.")
-        return
-    st.error(f"**Quality gate failed: {gate.issue_count} issue(s). Export is blocked until "
-             "all are resolved.**")
+
+    status_map = {
+        "PASSED": ("success", "PASSED — no critical or warning issues found."),
+        "PASSED_WITH_WARNINGS": ("warning", f"PASSED WITH REVIEW WARNINGS — "
+                                            f"{len(gate.warning_issues)} warning(s), export allowed."),
+        "FAILED_CRITICAL": ("error", f"FAILED — CRITICAL ISSUES — {len(gate.critical_issues)} critical "
+                                     f"issue(s) plus {len(gate.coverage_errors)} coverage error(s). "
+                                     "Export is blocked until every CRITICAL item is resolved."),
+    }
+    kind, message = status_map.get(gate.status, ("error", gate.status))
+    getattr(st, kind)(f"**Quality gate: {message}**")
+
     for err in gate.coverage_errors:
         st.error(f"Coverage: {err}")
-    if gate.issues:
-        with st.expander(f"Quality issues ({len(gate.issues)})", expanded=True):
-            issue_df = pd.DataFrame([{
-                "Row": i.row, "Column": i.column, "Issue": i.issue,
-                "Source": i.source, "Output": i.output, "Proposed fix": i.proposed_fix,
-            } for i in gate.issues])
-            st.dataframe(issue_df, use_container_width=True, hide_index=True)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Critical", len(gate.critical_issues))
+    m2.metric("Warning", len(gate.warning_issues))
+    m3.metric("Info (non-blocking)", len(gate.info_events))
+    m4.metric("Compressed names", sum(1 for c in (cells or []) if c.compression_event))
+    m5.metric("Failed cells", sum(1 for c in (cells or []) if c.gpt_failed))
+
+    if not gate.issues and not gate.info_events:
+        return
+
+    with st.expander(f"Review panel ({len(gate.issues)} issue(s), {len(gate.info_events)} info event(s))",
+                     expanded=gate.status != "PASSED"):
+        fc1, fc2 = st.columns(2)
+        severity_filter = fc1.selectbox("Severity", ["All", "Critical", "Warning", "Info"])
+        category_filter = fc2.selectbox(
+            "Category", ["All", "Product names", "Residue", "Glossary", "Information loss", "Other"]
+        )
+
+        headers = st.session_state.get("t_headers") or []
+        rows = []
+        for i in gate.issues:
+            severity = i.severity.value
+            category = _categorize_issue(i.issue)
+            if severity_filter != "All" and severity.title() != severity_filter:
+                continue
+            if category_filter != "All" and category != category_filter:
+                continue
+            ctx = _row_context(i.row, data_rows, headers)
+            rows.append({
+                "Severity": severity, "Category": category, "Row": i.row, "Column": i.column,
+                "articleNumber": ctx.get("articleNumber", ""), "Jira Key": ctx.get("Jira Key", ""),
+                "Source": i.source, "Output": i.output, "Issue": i.issue,
+                "Recommendation": i.proposed_fix,
+            })
+        if severity_filter in ("All", "Info"):
+            for ev in gate.info_events:
+                if category_filter not in ("All", "Product names"):
+                    continue
+                ctx = _row_context(ev.row, data_rows, headers)
+                rows.append({
+                    "Severity": "INFO", "Category": "Product names", "Row": ev.row, "Column": ev.column,
+                    "articleNumber": ctx.get("articleNumber", ""), "Jira Key": ctx.get("Jira Key", ""),
+                    "Source": ev.source, "Output": ev.compressed_name,
+                    "Issue": f"name compression ({ev.strategy})", "Recommendation": ev.recommendation,
+                })
+
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No items match the selected filters.")
+
+    if plan and cells:
+        unknown_cols = [c for c in plan.translatable_cols if c not in TRANSLATABLE_COLUMNS_NL]
+        if unknown_cols:
+            with st.expander(f"Unknown columns translated via generic profile ({', '.join(unknown_cols)})"):
+                unk_rows = [c.to_preview() for c in cells if c.column in unknown_cols]
+                if unk_rows:
+                    st.dataframe(pd.DataFrame(unk_rows), use_container_width=True, hide_index=True)
 
 
 def _render_download():
@@ -494,9 +623,9 @@ def _render_download():
     st.markdown("---")
     st.markdown("### Download translated files")
 
-    exclude_name = st.checkbox("Generate CSV without the `name` column", value=False,
-                               help="Excel always keeps the name column; the CSV can omit it.")
-    csv_bytes = _csv_for_download(exclude_name)
+    st.caption("Excel keeps every column, including `name`. The CSV always excludes "
+              "`name` and `Jira Key` (§24).")
+    csv_bytes = _csv_for_download()
 
     dc1, dc2 = st.columns(2)
     with dc1:
@@ -507,9 +636,8 @@ def _render_download():
                                use_container_width=True, type="primary")
     with dc2:
         if csv_bytes:
-            suffix = "_no-name" if exclude_name else ""
             st.download_button("Download NL CSV (.csv)", data=csv_bytes,
-                               file_name=f"NL-{stem}{suffix}.csv", mime="text/csv",
+                               file_name=f"NL-{stem}.csv", mime="text/csv",
                                use_container_width=True)
 
 
@@ -519,7 +647,12 @@ def _jira_key_headers(headers: list) -> list:
     return [h for h in headers if normalize_header(h) == target]
 
 
-def _csv_for_download(exclude_name: bool) -> bytes | None:
+def _csv_exclude_columns(headers: list) -> list:
+    """§24: CSV always excludes `name` and every Jira Key header spelling."""
+    return _jira_key_headers(headers) + ["name"]
+
+
+def _csv_for_download() -> bytes | None:
     headers = st.session_state.get("t_headers")
     data_rows = st.session_state.get("t_data_rows")
     cells = st.session_state.get("t_cells")
@@ -527,8 +660,7 @@ def _csv_for_download(exclude_name: bool) -> bytes | None:
         return st.session_state.get("t_csv_bytes")
     translation_map = _translation_map(cells)
     from exporters.csv_export import generate_csv_bytes
-    exclude = _jira_key_headers(headers) + (["name"] if exclude_name else [])
-    return generate_csv_bytes(headers, data_rows, translation_map, exclude_columns=exclude)
+    return generate_csv_bytes(headers, data_rows, translation_map, exclude_columns=_csv_exclude_columns(headers))
 
 
 def _translation_map(cells) -> dict:
@@ -536,6 +668,26 @@ def _translation_map(cells) -> dict:
     for c in cells:
         tmap.setdefault(c.row - 1, {})[c.column] = c.target
     return tmap
+
+
+_SEVERITY_RANK = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
+
+
+def _severity_map(gate) -> dict:
+    """{(1-based row, column): 'CRITICAL'|'WARNING'|'INFO'} for Excel review
+    highlighting — the highest severity wins when a cell has multiple issues."""
+    if not gate:
+        return {}
+    result: dict[tuple, str] = {}
+    for i in gate.issues:
+        key = (i.row, i.column)
+        sev = i.severity.value
+        if _SEVERITY_RANK[sev] > _SEVERITY_RANK.get(result.get(key, "INFO"), 0):
+            result[key] = sev
+    for ev in gate.info_events:
+        key = (ev.row, ev.column)
+        result.setdefault(key, "INFO")
+    return result
 
 
 # ── Validate & generate ──────────────────────────────────────────────────
@@ -582,7 +734,7 @@ def _validate_and_generate(edited_rows: list):
     # Re-run quality gate on the edited cells.
     from engines.nl.localization_engine import get_localization_engine
     engine = get_localization_engine(use_gpt=True)
-    coverage = _build_coverage(cells, plan) if plan else []
+    coverage, reconciliation = _build_coverage(cells, plan, data_rows) if plan else ([], {})
     coverage_errors = [
         f"'{c['Column']}': {c['Translated']} translated, {c['Source cells']} expected"
         for c in coverage if not c["_ok"] and c["Source cells"] > 0
@@ -590,13 +742,15 @@ def _validate_and_generate(edited_rows: list):
     gate = engine.quality_report(cells, coverage_errors=coverage_errors)
     st.session_state["t_gate"] = gate
     st.session_state["t_coverage"] = coverage
+    st.session_state["t_reconciliation"] = reconciliation
     st.session_state["t_stats"] = _build_stats(cells)
 
     if not gate.passed:
         st.session_state["t_xl_bytes"] = None
         st.session_state["t_csv_bytes"] = None
         st.session_state["t_version"] = (st.session_state.get("t_version") or 0) + 1
-        st.error(f"Export blocked: {gate.issue_count} quality issue(s) remain. Fix the "
+        n_critical = len(gate.critical_issues) + len(gate.coverage_errors)
+        st.error(f"Export blocked: {n_critical} CRITICAL issue(s) remain. Fix the "
                  "highlighted cells and click Validate again.")
         st.rerun()
         return
@@ -607,13 +761,16 @@ def _validate_and_generate(edited_rows: list):
     translation_map = _translation_map(cells)
     try:
         from exporters.xlsx_export import export_workbook_translated_bytes
-        xl_bytes = export_workbook_translated_bytes(file_bytes, translation_map, headers, sheet_name=sheet_name)
+        xl_bytes = export_workbook_translated_bytes(
+            file_bytes, translation_map, headers, sheet_name=sheet_name,
+            severity_map=_severity_map(gate),
+        )
     except Exception as e:
         st.error(f"Excel export failed: {e}")
         return
     try:
         from exporters.csv_export import generate_csv_bytes
-        csv_bytes = generate_csv_bytes(headers, data_rows, translation_map, exclude_columns=_jira_key_headers(headers))
+        csv_bytes = generate_csv_bytes(headers, data_rows, translation_map, exclude_columns=_csv_exclude_columns(headers))
     except Exception as e:
         st.error(f"CSV export failed: {e}")
         return

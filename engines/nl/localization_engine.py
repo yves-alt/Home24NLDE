@@ -182,7 +182,12 @@ class DutchLocalizationEngine:
 
         # 4. German remains → controlled GPT (models masked).
         if self.gpt_active:
-            prot = self._protector.protect(text)
+            # The `name` column is always catalog-style, even when several
+            # accessories push it past the auto-aggressive word-count cutoff —
+            # use head-aware masking so the model name is never left
+            # unprotected in front of GPT (§10), without also sweeping up
+            # ordinary German nouns later in the name as fake models.
+            prot = self._protector.protect_name(text) if column == "name" else self._protector.protect(text)
             res = self._gpt.translate(prot.text, column, self._gpt_column_rule(column, text))
             if res.ok and res.text:
                 restored = self._protector.restore(res.text, prot.mapping)
@@ -201,7 +206,11 @@ class DutchLocalizationEngine:
 
     def translate_cell(self, row: int, column: str, source) -> CellResult:
         text = "" if source is None else str(source).strip()
-        models = self._protector.protect(text).model_names if text else []
+        if text:
+            models = (self._protector.protect_name(text) if column == "name"
+                     else self._protector.protect(text)).model_names
+        else:
+            models = []
 
         if not text:
             return CellResult(row, column, text, "", "EMPTY", 1.0, "EMPTY", models)
@@ -226,10 +235,12 @@ class DutchLocalizationEngine:
         warnings = list(abbr.warnings)
 
         # Name column rules.
+        compression_event = None
         if column == "name":
-            name_res = self._name.optimize(target)
+            name_res = self._name.optimize(target, source=text, model_names=models, row=row)
             target = name_res.name
             warnings.extend(name_res.warnings)
+            compression_event = name_res.compression_event
 
         # Optional GPT naturalness refinement (off by default; never reduces correctness).
         origin = self._summarize_origin(origins)
@@ -243,6 +254,7 @@ class DutchLocalizationEngine:
             row=row, column=column, source=text, target=target,
             origin=origin, confidence=score, confidence_label=label,
             model_names=models, warnings=warnings, gpt_failed=gpt_failed,
+            compression_event=compression_event,
         )
 
     def _summarize_origin(self, origins: list[str]) -> str:
@@ -330,7 +342,8 @@ class DutchLocalizationEngine:
         if (still_dirty or info_lost) and self.gpt_active:
             if stats is not None:
                 stats.gpt_retries += 1
-            prot = self._protector.protect(cell.source)
+            prot = (self._protector.protect_name(cell.source) if cell.column == "name"
+                   else self._protector.protect(cell.source))
             gpt_res = self._gpt.translate(
                 prot.text, cell.column, self._gpt_column_rule(cell.column, cell.source)
             )
@@ -344,8 +357,12 @@ class DutchLocalizationEngine:
 
         # Step 5: Name column rules.
         if cell.column == "name":
-            name_res = self._name.optimize(cell.target)
+            name_res = self._name.optimize(
+                cell.target, source=cell.source, model_names=cell.model_names, row=cell.row,
+            )
             cell.target = name_res.name
+            if name_res.compression_event:
+                cell.compression_event = name_res.compression_event
             if name_res.warnings and name_res.warnings not in cell.warnings:
                 cell.warnings = list(set(cell.warnings) | set(name_res.warnings))
 
